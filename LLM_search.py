@@ -63,17 +63,17 @@ def search_agent(user_query):
             print(f"No JSON found. Raw response: {response}")
             return None
         data = json.loads(json_match.group())
-        optimized_query = data.pop("optimized_prompt", user_query)
+        opt_retr_query = data.pop("optimized_prompt", user_query)
         
         payload_filters = data
-        print(f"Optimized Prompt: {optimized_query}")
+        print(f"Optimized Retrieval Query: {opt_retr_query}")
         print(f"Payload Filters: {payload_filters}")
         
         # Embed the optimized prompt
-        query_vec = embed_model.encode(optimized_query).tolist()
+        query_vec = embed_model.encode(opt_retr_query).tolist()
         # Call the search function
         results = search_with_payload(query_vec, payload_must=payload_filters)
-        return optimized_query,results
+        return opt_retr_query,results
 
     except Exception as e:
         print(f"Error in search_agent: {e}")
@@ -140,43 +140,72 @@ Guidelines:
 
 # %%
 if __name__ == "__main__":
-    from trulens_self import evaluate_trulens_response
+    from trulens_eval import evaluate_trulens_response
     
-    query = "what was the 3m (mmm) revenue for the fiscal year ending 2022?"
-    print(f"\nUser Query: {query}")
+    # Path to the dataset
+    DATASET_PATH = "/Users/nadavsmacbookair/Desktop/Thesis/Sources/data/financebench_open_source.jsonl"
     
-    # 1. Search and Retrieve
-    opt_query,results = search_agent(query)
-    
-    if results:
-        # 2. Generate Answer
-        # Note: We use the oORIGINAL user query for evaluation 
-        # For evaluation, RAGAS usually takes the original user query.
-        answer, chunk_sources = response(query, results)
-        print("\n=== LLM Answer ===")
-        print(answer)
+    # 1. Load and filter dataset
+    filtered_pairs = []
+    try:
+        with open(DATASET_PATH, "r") as f:
+            for line in f:
+                record = json.loads(line)
+                company = record.get("company", "").lower()
+                doc_name = record.get("doc_name", "").lower()
+                
+                # Check for 3M and 2022
+                if ("3m" in company or "mmm" in company) and ("2022" in doc_name):
+                    filtered_pairs.append({
+                        "question": record["question"],
+                        "reference_answer": record["answer"]
+                    })
+    except Exception as e:
+        print(f"Error loading dataset: {e}")
         
-        # 3. Evaluate with TRULENS
-        print("\n=== Running TRULENS Evaluation ===")
-        # try:
+    print(f"Found {len(filtered_pairs)} relevant question-answer pairs for 3M in 2022.")
+    
+    # 2. Iterate and run the pipeline
+    for i, pair in enumerate(filtered_pairs, 1):
+        query = pair["question"]
+        ref_answer = pair["reference_answer"]
+        print(f"\n{'='*50}")
+        print(f"Query {i}/ out of {len(filtered_pairs)}: {query}")
+        print(f"Reference Answer: {ref_answer}")
+        print(f"{'='*50}")
+        
+        # Search and Retrieve
+        import time
+        try:
+            opt_ret_query, results = search_agent(query)
             
-        scores = evaluate_trulens_response(query, answer, results)
-        print("\n=== trulens Scores [0-1]===")
-        print("full score table\n",scores)
-        for metric, score in scores.items():
-            if metric == "error":
-                print(f"Error: {score}")
-                continue
-            if metric not in ["question", "answer", "contexts"]: # everything but the given 
-                if isinstance(score, dict):
-                    numeric_score = float(score.get("score", list(score.values())[0]))
-                else:
-                    numeric_score = float(score)
+            if results and results.points:
+                # Generate Answer
+                answer, chunk_sources = response(query, results) #use original query, NOT retrieval query
+                print("\n--- LLM Answer ---")
+                print(answer)
+                
+                # Evaluate with TRULENS
+                print("\n--- Running TRULENS Evaluation ---")
+                # Add a sleep to prevent connection overload on the local LLM proxy
+                time.sleep(20)
+                scores = evaluate_trulens_response(query, answer, results)
+                print("\n--- trulens Scores [0-1] ---")
+                for metric, score in scores.items():
+                    if metric == "error":
+                        print(f"Error: {score}")
+                        continue
+                    if metric not in ["question", "answer", "contexts"]: 
+                        if isinstance(score, dict):
+                            val = list(score.values())[0] if score else 0
+                            numeric_score = float(score.get("score", val))
+                        else:
+                            numeric_score = float(score)
 
-                print(f"{metric.capitalize()}: {numeric_score:.4f}")
-        # except Exception as e:
-        #     print(f"error")
-    else:
-        print("Search failed or returned no results.")
+                        print(f"{metric.capitalize()}: {numeric_score:.4f}")
+            else:
+                print("Search failed or returned no results.")
+        except Exception as e:
+            print(f"Pipeline failed for query {i}: {e}")
 
 # %%
