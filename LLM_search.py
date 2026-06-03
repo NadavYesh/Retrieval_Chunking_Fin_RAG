@@ -4,17 +4,12 @@ from qdrant_client import QdrantClient, models
 client = QdrantClient(url="http://localhost:6333", check_compatibility=True)
 import uuid
 from qdrant_client.models import Distance, VectorParams
-from search import payload_search
+from search import search_with_payload
 
-#%%
+#%%  
 '''
 implement an LLM that given a query, extracts the correct payloads:form_type,ticker,fiscal_year_end
-The LLM will call payload_search.
-'''
-
-
-'''
-
+The LLM will call search_with_payload.
 '''
 from mlx_lm import load, generate
 from sentence_transformers import SentenceTransformer
@@ -45,7 +40,7 @@ def search_agent(user_query):
     1. Enhances the user query for vector search using an LLM.
     2. Extracts payload filters (ticker, date, form_type).
     3. Embeds the optimized prompt.
-    4. Calls payload_search to get results.
+    4. Calls search_with_payload to get results.
     """
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
@@ -74,25 +69,45 @@ def search_agent(user_query):
         # Embed the optimized prompt
         query_vec = embed_model.encode(optimized_query).tolist()
         # Call the search function
-        results = payload_search(query_vec, payload_must=payload_filters)
+        results = search_with_payload(query_vec, payload_must=payload_filters)
         return results
 
     except Exception as e:
         print(f"Error in search_agent: {e}")
         return None
 
+
+def response(user_query,search_results):
+    '''
+    Given a user query and search results, this function returns an LLM generated answer to the user query.
+    The given chunks are handled with reducing importance. The LLM is instructed to only use relevant chunks.
+    args: 
+        user_query: str
+        search_results: QueryResponse (The search results from Qdrant [five chunks]).
+    Returns:
+        response: str
+    '''
+    response=""
+
+    return(response)
+
+
 if __name__ == "__main__":
     # Example usage
     test_query = "What were the main risk factors for 3M in year 2022?"
     print(f"User Query: {test_query}")
-    results = search_agent(test_query)
+    test_results = search_agent(test_query)
     
-    if results and hasattr(results, 'points'):
-        print(f"\nFound {len(results.points)} results:")
-        for point in results.points:
+    if test_results and hasattr(test_results, 'points'):
+        print(f"\nFound {len(test_results.points)} results:")
+        for point in test_results.points:
             print(f"Score: {point.score:.4f}")
             print(f"Meta: {point.payload.get("ticker"), point.payload.get("company_name"),point.payload.get("fiscal_year_end")}")
             print(f"Text: {point.payload.get('text')[:200]}...")
             print("-" * 20)
     else:
         print("No results returned.")
+
+    # print("\n==============================")
+    # print("LLM generated answer\n")
+    # response_text = response(test_query,test_results)
