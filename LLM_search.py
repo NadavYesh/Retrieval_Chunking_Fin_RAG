@@ -16,11 +16,12 @@ from sentence_transformers import SentenceTransformer
 import json
 import re
 from datetime import datetime
+from transformers import AutoTokenizer, AutoModel
 
 # Load LLM and Embedding Model
 model, tokenizer, *extra = load("mlx-community/Llama-3.2-3B-Instruct-4bit")
 embed_model = SentenceTransformer("google/embeddinggemma-300M", device="mps")
-
+#%%
 SYSTEM_PROMPT = """
 You are a financial analysis expert specializing in SEC 10-K filings. Your task is to transform a user's natural language request into a structured search object.
 
@@ -139,13 +140,42 @@ Guidelines:
 
 # %%
 if __name__ == "__main__":
+    from trulens_self import evaluate_trulens_response
+    
     query = "what was the 3m (mmm) revenue for the fiscal year ending 2022?"
-    print(f"User Query: {query}")
-    optimized_query,results = search_agent(query)
+    print(f"\nUser Query: {query}")
+    
+    # 1. Search and Retrieve
+    opt_query,results = search_agent(query)
     
     if results:
-        answer,chunk_sources = response(optimized_query, results)
+        # 2. Generate Answer
+        # Note: We use the oORIGINAL user query for evaluation 
+        # For evaluation, RAGAS usually takes the original user query.
+        answer, chunk_sources = response(query, results)
         print("\n=== LLM Answer ===")
         print(answer)
+        
+        # 3. Evaluate with TRULENS
+        print("\n=== Running TRULENS Evaluation ===")
+        # try:
+            
+        scores = evaluate_trulens_response(query, answer, results)
+        print("\n=== trulens Scores ===")
+        for metric, score in scores.items():
+            if metric == "error":
+                print(f"Error: {score}")
+                continue
+            if metric not in ["question", "answer", "contexts"]:
+                if isinstance(score, dict):
+                    numeric_score = float(score.get("score", list(score.values())[0]))
+                else:
+                    numeric_score = float(score)
+
+                print(f"{metric.capitalize()}: {numeric_score:.4f}")
+        # except Exception as e:
+        #     print(f"error")
     else:
         print("Search failed or returned no results.")
+
+# %%
