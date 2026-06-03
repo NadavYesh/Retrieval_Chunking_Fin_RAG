@@ -1,18 +1,16 @@
 #%%
 import numpy as np
 from trulens.core import Metric, TruSession, Selector
-from trulens.providers.litellm import LiteLLM
-import litellm
 from trulens.dashboard import run_dashboard
 session = TruSession()
-session.reset_database()
+session.reset_database() 
 
-
-litellm.api_base = "http://localhost:8080/v1"
-litellm.api_key = "dummy"
-
-provider = LiteLLM(
-    model_engine="openai/mlx-community/Llama-3.2-3B-Instruct-4bit"
+# Configure for local mlx-openai-server
+from trulens.providers.openai import OpenAI
+provider = OpenAI(
+    model_engine="mlx-community/Llama-3.2-3B-Instruct-4bit",
+    api_key="dummy",
+    base_url="http://localhost:8080/v1"
 )
 
 #%%
