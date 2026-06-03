@@ -161,12 +161,13 @@ if __name__ == "__main__":
         # try:
             
         scores = evaluate_trulens_response(query, answer, results)
-        print("\n=== trulens Scores ===")
+        print("\n=== trulens Scores [0-1]===")
+        print("full score table\n",scores)
         for metric, score in scores.items():
             if metric == "error":
                 print(f"Error: {score}")
                 continue
-            if metric not in ["question", "answer", "contexts"]:
+            if metric not in ["question", "answer", "contexts"]: # everything but the given 
                 if isinstance(score, dict):
                     numeric_score = float(score.get("score", list(score.values())[0]))
                 else:

@@ -1,9 +1,12 @@
 #%%
 import numpy as np
-from trulens.core import Metric
-from trulens.core import Selector
+from trulens.core import Metric, TruSession, Selector
 from trulens.providers.litellm import LiteLLM
 import litellm
+from trulens.dashboard import run_dashboard
+session = TruSession()
+session.reset_database()
+
 
 litellm.api_base = "http://localhost:8080/v1"
 litellm.api_key = "dummy"
@@ -89,6 +92,7 @@ def evaluate_trulens_response(
     # Answer relevance: between query and response
     try:
         raw = provider.relevance_with_cot_reasons(prompt=query, response=response_text)
+        print(f"Raw answer relevance: {raw}")
         scores["answer_relevance"] = _extract_score(raw)
     except Exception as exc:
         errors["answer_relevance"] = str(exc)
@@ -99,19 +103,17 @@ def evaluate_trulens_response(
         context_scores = []
         for context in contexts:
             raw = provider.context_relevance_with_cot_reasons(question=query, context=context)
+            print(f"Raw context relevance: {raw}")
             context_scores.append(_extract_score(raw))
         scores["context_relevance"] = sum(context_scores) / len(context_scores)
     except Exception as exc:
         errors["context_relevance"] = str(exc)
-
-
-
-
     # Groundedness: evaluate response against all contexts
     try:
         raw = provider.groundedness_measure_with_cot_reasons_consider_answerability(
             source=contexts, statement=response_text, question=query
         )
+        print(f"Raw groundedness: {raw}")
         scores["groundedness"] = _extract_score(raw)
     except Exception as exc:
         errors["groundedness"] = str(exc)
