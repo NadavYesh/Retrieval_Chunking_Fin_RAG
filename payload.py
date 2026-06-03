@@ -1,6 +1,14 @@
+#%%
 import pydantic
+import pandas as pd
+from qdrant_client import QdrantClient
+client = QdrantClient(url="http://localhost:6333", check_compatibility=True)
+import uuid
+from qdrant_client import models
+from qdrant_client.models import Distance, VectorParams
 
 from typing import Optional
+from datetime import datetime
 
 class doc_payload(pydantic.BaseModel):
     '''
@@ -9,7 +17,7 @@ class doc_payload(pydantic.BaseModel):
     form_type: Optional[str] = None
     company_name: Optional[str] = None
     ticker: Optional[str] = None
-    fiscal_year_end: Optional[str] = None
+    fiscal_year_end: Optional[datetime] = None
     section: Optional[str] = None
     subsection: Optional[str] = None
     item: Optional[str] = None
@@ -22,12 +30,6 @@ class doc_payload(pydantic.BaseModel):
             return v.strip().lower()
         return v
 
-#%%
-import pandas as pd
-from qdrant_client import QdrantClient, models
-client = QdrantClient(url="http://localhost:6333", check_compatibility=True)
-import uuid
-from qdrant_client.models import Distance, VectorParams
 
 try:
     client.create_collection(
@@ -56,7 +58,7 @@ client.create_payload_index(
 client.create_payload_index(
     collection_name="quant",
     field_name="fiscal_year_end",
-    field_schema=models.PayloadSchemaType.TEXT, 
+    field_schema=models.PayloadSchemaType.DATETIME, 
 )    
 client.create_payload_index(
     collection_name="quant",
@@ -94,6 +96,10 @@ print("Starting upserting loop...")
 for chunk in chunks_df:
     texts = chunk['text'].tolist() if hasattr(chunk['text'], 'tolist') else chunk['text']
     metadatas = chunk['metadata'].tolist() if hasattr(chunk['metadata'], 'tolist') else chunk['metadata']
+    for i in range(len(metadatas)):
+        date_ = metadatas[i]["fiscal_year_end"]
+        date_ = date_[:len(date_)-2] + "20" + date_[len(date_)-2:]
+        metadatas[i]["fiscal_year_end"] = datetime.strptime(date_, "%m-%d-%Y").date()
 
     print(f"Encoding {len(texts)} chunks...")
     embeddings = model.encode(texts, show_progress_bar=True).tolist()
@@ -183,3 +189,5 @@ if __name__ == "__main__":
         print("FinanceBench data file not found. Skipping search example.")
     except Exception as e:
         print(f"An error occurred during search: {e}")
+
+
