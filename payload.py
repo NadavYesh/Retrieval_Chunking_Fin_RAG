@@ -30,60 +30,72 @@ class doc_payload(pydantic.BaseModel):
             return v.strip().lower()
         return v
 
-
-try:
-    client.create_collection(
-        collection_name="quant",
-        vectors_config=VectorParams(size=768, distance=Distance.COSINE),
-        on_disk_payload=True # keeps unindexed meta out of RAM
-    )
-except Exception as e:
-    print("exists")
-#%%
-client.create_payload_index(
-    collection_name="quant",
-    field_name="form_type",
-    field_schema=models.PayloadSchemaType.KEYWORD, 
-)
-client.create_payload_index(
-collection_name="quant",
-    field_name="company_name",
-    field_schema=models.PayloadSchemaType.KEYWORD, 
-)
-client.create_payload_index(
-    collection_name="quant",
-    field_name="ticker",
-    field_schema=models.PayloadSchemaType.KEYWORD, 
-)    
-client.create_payload_index(
-    collection_name="quant",
-    field_name="fiscal_year_end",
-    field_schema=models.PayloadSchemaType.DATETIME, 
-)    
-client.create_payload_index(
-    collection_name="quant",
-    field_name="section",
-    field_schema=models.PayloadSchemaType.TEXT, 
-)
-client.create_payload_index(
-    collection_name="quant",
-    field_name="subsection",
-    field_schema=models.PayloadSchemaType.TEXT, 
-)
-client.create_payload_index(
-    collection_name="quant",
-    field_name="item",
-    field_schema=models.PayloadSchemaType.TEXT, 
-)
+coll_name = "headers_split"
 
 
-#%% upserting
+
+
+# try:
+#     client.create_collection(
+#         collection_name=coll_name,
+#         vectors_config=VectorParams(size=768, distance=Distance.COSINE),
+#         on_disk_payload=True # keeps unindexed meta out of RAM
+#     )
+# except Exception as e:
+#     print("exists")
+# #%%
+# client.create_payload_index(
+#     collection_name="quant",
+#     field_name="form_type",
+#     field_schema=models.PayloadSchemaType.KEYWORD, 
+# )
+# client.create_payload_index(
+# collection_name="quant",
+#     field_name="company_name",
+#     field_schema=models.PayloadSchemaType.KEYWORD, 
+# )
+# client.create_payload_index(
+#     collection_name="quant",
+#     field_name="ticker",
+#     field_schema=models.PayloadSchemaType.KEYWORD, 
+# )    
+# client.create_payload_index(
+#     collection_name="quant",
+#     field_name="fiscal_year_end",
+#     field_schema=models.PayloadSchemaType.DATETIME, 
+# )    
+# client.create_payload_index(
+#     collection_name="quant",
+#     field_name="section",
+#     field_schema=models.PayloadSchemaType.TEXT, 
+# )
+# client.create_payload_index(
+#     collection_name="quant",
+#     field_name="subsection",
+#     field_schema=models.PayloadSchemaType.TEXT, 
+# )
+# client.create_payload_index(
+#     collection_name="quant",
+#     field_name="item",
+#     field_schema=models.PayloadSchemaType.TEXT, 
+# )
+
+
+#%% upserting 
+# coll_name = "headers_split"
 import pickle
 from sentence_transformers import SentenceTransformer
 import torch
 from qdrant_client.models import PointStruct
 
-chunk_paths = ["/Users/nadavsmacbookair/Desktop/Thesis/code/data/BESTBUY_2023_10K-Chunks.pkl", "/Users/nadavsmacbookair/Desktop/Thesis/code/data/3M_2022_10K-Chunks.pkl"]
+
+chunk_paths = [f"/Users/nadavsmacbookair/Desktop/Thesis/code/data/chunks/header_split/{file}" for file in [
+    # "3M_2018_10K.pkl","ADOBE_2016_10K.pkl", כבר עלו
+    # "PAYPAL_2022_10K.pkl", 
+    #"3M_2022_10K.pkl"
+    "ADOBE_2017_10K.pkl"
+    ]]
+
 chunks_df=[]
 for path in chunk_paths:
     with open(path, "rb") as f:
@@ -92,6 +104,7 @@ for path in chunk_paths:
 # Load embedding model
 model = SentenceTransformer("google/embeddinggemma-300M", device="mps")
 
+#%%
 print("Starting upserting loop...")
 for chunk in chunks_df:
     texts = chunk['text'].tolist() if hasattr(chunk['text'], 'tolist') else chunk['text']
@@ -129,7 +142,7 @@ for chunk in chunks_df:
     
     print(f"Upserting {len(points)} points to Qdrant...")
     client.upsert(
-        collection_name="quant",
+        collection_name=coll_name,
         wait=True,
         points=points
     )
@@ -137,57 +150,57 @@ for chunk in chunks_df:
 
 #%% Inspect Collection
 print("Inspecting collection...")
-inspect_results = client.scroll("quant", limit=10)
+inspect_results = client.scroll(coll_name, limit=10)
 print(f"Retrieved {len(inspect_results[0])} points sample.")
 
 # %%
-if __name__ == "__main__":
-    TEN_K_NAMES = ["3M_2022_10K","BESTBUY_2023_10K"]
-    # Adjust path to financebench if needed, using sample names for query subsetting
-    try:
-        Q_A_fb = pd.read_json("/Users/nadavsmacbookair/Documents/sec2md/financebench/data/financebench_open_source.jsonl",lines=True)
-        results_list = []
+# if __name__ == "__main__":
+#     TEN_K_NAMES = ["3M_2022_10K","BESTBUY_2023_10K"]
+#     # Adjust path to financebench if needed, using sample names for query subsetting
+#     try:
+#         Q_A_fb = pd.read_json("/Users/nadavsmacbookair/Documents/sec2md/financebench/data/financebench_open_source.jsonl",lines=True)
+#         results_list = []
         
-        for name in TEN_K_NAMES:
-            # SEARCH
-            QA_subset = Q_A_fb[Q_A_fb['doc_name']==name]
-            questions = QA_subset["question"].tolist()
+#         for name in TEN_K_NAMES:
+#             # SEARCH
+#             QA_subset = Q_A_fb[Q_A_fb['doc_name']==name]
+#             questions = QA_subset["question"].tolist()
             
-            if not questions:
-                print(f"No questions found for {name}")
-                continue
+#             if not questions:
+#                 print(f"No questions found for {name}")
+#                 continue
                 
-            print(f"Embedding {len(questions)} questions for {name}...")
-            question_embeddings = model.encode(questions)
+#             print(f"Embedding {len(questions)} questions for {name}...")
+#             question_embeddings = model.encode(questions)
             
-            print(f"Searching Qdrant for {name}...")
-            for i, query_vector in enumerate(question_embeddings):
-                search_results = client.query_points(
-                    collection_name="quant",
-                    query=query_vector.tolist(),
-                    limit=5,
-                    with_payload=True,
-                ).points
+#             print(f"Searching Qdrant for {name}...")
+#             for i, query_vector in enumerate(question_embeddings):
+#                 search_results = client.query_points(
+#                     collection_name="quant",
+#                     query=query_vector.tolist(),
+#                     limit=5,
+#                     with_payload=True,
+#                 ).points
                 
-                for res in search_results:
-                    results_list.append({
-                        "doc_name": name,
-                        "question": questions[i],
-                        "score": res.score,
-                        "retrieved_text": res.payload.get("text", ""),
-                        "metadata": {k: v for k, v in res.payload.items() if k != "text"}
-                    })
+#                 for res in search_results:
+#                     results_list.append({
+#                         "doc_name": name,
+#                         "question": questions[i],
+#                         "score": res.score,
+#                         "retrieved_text": res.payload.get("text", ""),
+#                         "metadata": {k: v for k, v in res.payload.items() if k != "text"}
+#                     })
         
-        results_df = pd.DataFrame(results_list)
-        print("Search Completed. Results DataFrame created.")
-        if not results_df.empty:
-            print(results_df.head())
-        else:
-            print("No search results found.")
+#         results_df = pd.DataFrame(results_list)
+#         print("Search Completed. Results DataFrame created.")
+#         if not results_df.empty:
+#             print(results_df.head())
+#         else:
+#             print("No search results found.")
             
-    except FileNotFoundError:
-        print("FinanceBench data file not found. Skipping search example.")
-    except Exception as e:
-        print(f"An error occurred during search: {e}")
+#     except FileNotFoundError:
+#         print("FinanceBench data file not found. Skipping search example.")
+#     except Exception as e:
+#         print(f"An error occurred during search: {e}")
 
 
