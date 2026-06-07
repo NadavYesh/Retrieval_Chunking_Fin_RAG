@@ -9,7 +9,7 @@ from qdrant_client.models import Distance, VectorParams
 
 from typing import Optional
 from datetime import datetime
-
+#%%
 class doc_payload(pydantic.BaseModel):
     '''
     This class insures data consistency. Not all metadata fields exist for all chunks. Therefore, they're defaulted to None
@@ -30,55 +30,55 @@ class doc_payload(pydantic.BaseModel):
             return v.strip().lower()
         return v
 
-coll_name = "headers_split"
+coll_name = "--split headers,chars --embeddings text-only"
 
 
 
 
-# try:
-#     client.create_collection(
-#         collection_name=coll_name,
-#         vectors_config=VectorParams(size=768, distance=Distance.COSINE),
-#         on_disk_payload=True # keeps unindexed meta out of RAM
-#     )
-# except Exception as e:
-#     print("exists")
-# #%%
-# client.create_payload_index(
-#     collection_name="quant",
-#     field_name="form_type",
-#     field_schema=models.PayloadSchemaType.KEYWORD, 
-# )
-# client.create_payload_index(
-# collection_name="quant",
-#     field_name="company_name",
-#     field_schema=models.PayloadSchemaType.KEYWORD, 
-# )
-# client.create_payload_index(
-#     collection_name="quant",
-#     field_name="ticker",
-#     field_schema=models.PayloadSchemaType.KEYWORD, 
-# )    
-# client.create_payload_index(
-#     collection_name="quant",
-#     field_name="fiscal_year_end",
-#     field_schema=models.PayloadSchemaType.DATETIME, 
-# )    
-# client.create_payload_index(
-#     collection_name="quant",
-#     field_name="section",
-#     field_schema=models.PayloadSchemaType.TEXT, 
-# )
-# client.create_payload_index(
-#     collection_name="quant",
-#     field_name="subsection",
-#     field_schema=models.PayloadSchemaType.TEXT, 
-# )
-# client.create_payload_index(
-#     collection_name="quant",
-#     field_name="item",
-#     field_schema=models.PayloadSchemaType.TEXT, 
-# )
+try:
+    client.create_collection(
+        collection_name=coll_name,
+        vectors_config=VectorParams(size=768, distance=Distance.COSINE),
+        on_disk_payload=True # keeps unindexed meta out of RAM
+    )
+except Exception as e:
+    print("exists")
+#%%
+client.create_payload_index(
+    collection_name="quant",
+    field_name="form_type",
+    field_schema=models.PayloadSchemaType.KEYWORD, 
+)
+client.create_payload_index(
+collection_name="quant",
+    field_name="company_name",
+    field_schema=models.PayloadSchemaType.KEYWORD, 
+)
+client.create_payload_index(
+    collection_name="quant",
+    field_name="ticker",
+    field_schema=models.PayloadSchemaType.KEYWORD, 
+)    
+client.create_payload_index(
+    collection_name="quant",
+    field_name="fiscal_year_end",
+    field_schema=models.PayloadSchemaType.DATETIME, 
+)    
+client.create_payload_index(
+    collection_name="quant",
+    field_name="section",
+    field_schema=models.PayloadSchemaType.TEXT, 
+)
+client.create_payload_index(
+    collection_name="quant",
+    field_name="subsection",
+    field_schema=models.PayloadSchemaType.TEXT, 
+)
+client.create_payload_index(
+    collection_name="quant",
+    field_name="item",
+    field_schema=models.PayloadSchemaType.TEXT, 
+)
 
 
 #%% upserting 
@@ -89,12 +89,12 @@ import torch
 from qdrant_client.models import PointStruct
 
 
-chunk_paths = [f"/Users/nadavsmacbookair/Desktop/Thesis/code/data/chunks/header_split/{file}" for file in [
-     "3M_2018_10K.pkl",
-     "ADOBE_2016_10K.pkl",
-     "PAYPAL_2022_10K.pkl", 
-    "3M_2022_10K.pkl",
-    "ADOBE_2017_10K.pkl"
+chunk_paths = [f"/Users/nadavsmacbookair/Desktop/Thesis/code/data/chunks/header_and_chars_split/{file}" for file in [
+    "3M_2018_10K.pkl" 
+    # "ADOBE_2016_10K.pkl",
+    # "PAYPAL_2022_10K.pkl", 
+    # "3M_2022_10K.pkl",
+    # "ADOBE_2017_10K.pkl"
     ]]
 
 # print number of chunks totally
@@ -131,6 +131,7 @@ for path in chunk_paths:
     
     texts = chunk['text'].tolist() if hasattr(chunk['text'], 'tolist') else chunk['text']
     metadatas = chunk['metadata'].tolist() if hasattr(chunk['metadata'], 'tolist') else chunk['metadata']
+    breakpoint()
     
     # Pre-process metadatas (date conversion)
     for i in range(len(metadatas)):
