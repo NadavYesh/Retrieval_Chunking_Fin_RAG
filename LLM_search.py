@@ -4,9 +4,9 @@ from qdrant_client import QdrantClient, models
 client = QdrantClient(url="http://localhost:6333", check_compatibility=True)
 import uuid
 from qdrant_client.models import Distance, VectorParams
-from search import search_with_payload
+from search import search_with_payload, coll_name
 
-#%%  
+#%% Payload Extraction 
 '''
 implement an LLM that given a query, extracts the correct payloads:form_type,ticker,fiscal_year_end
 The LLM will call search_with_payload.
@@ -21,7 +21,7 @@ from transformers import AutoTokenizer, AutoModel
 # Load LLM and Embedding Model
 model, tokenizer, *extra = load("mlx-community/Llama-3.2-3B-Instruct-4bit")
 embed_model = SentenceTransformer("google/embeddinggemma-300M", device="mps")
-#%%
+#%% Prompt rewriting agent
 SYSTEM_PROMPT = """
 You are a financial analysis expert specializing in SEC 10-K filings. Your task is to transform a user's natural language request into a structured search object.
 
@@ -72,7 +72,7 @@ def search_agent(user_query):
         # Embed the optimized prompt
         query_vec = embed_model.encode(opt_retr_query).tolist()
         # Call the search function
-        results = search_with_payload(query_vec, payload_must=payload_filters)
+        results = search_with_payload(coll_name, query_vec, payload_must=payload_filters)
         return opt_retr_query,results
 
     except Exception as e:
