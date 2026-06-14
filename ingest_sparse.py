@@ -46,6 +46,7 @@ def upsert_sparse_data():
         
         texts = chunk['text'].tolist() if hasattr(chunk['text'], 'tolist') else chunk['text']
         metadatas = chunk['metadata'].tolist() if hasattr(chunk['metadata'], 'tolist') else chunk['metadata']
+        ids = chunk['id'].tolist() if 'id' in chunk.columns else [str(uuid.uuid4()) for _ in range(len(texts))]
 
         # Pre-process metadatas
         for i in range(len(metadatas)):
@@ -60,10 +61,15 @@ def upsert_sparse_data():
         else:
             combined = texts
         
-        for batch_idx, (batch_texts, batch_metadatas) in enumerate(zip(get_batches(combined, batch_size), get_batches(metadatas, batch_size))):
+        batches = zip(
+            get_batches(combined, batch_size), 
+            get_batches(metadatas, batch_size), 
+            get_batches(ids, batch_size)
+        )
+        for batch_idx, (batch_texts, batch_metadatas, batch_ids) in enumerate(batches):
             print(f"  Processing batch {batch_idx + 1}...")
             points = []
-            for idx, (metadata, text) in enumerate(zip(batch_metadatas, batch_texts)):
+            for idx, (metadata, text, p_id) in enumerate(zip(batch_metadatas, batch_texts, batch_ids)):
                 try:
                     validated_payload = doc_payload(**metadata).model_dump()
                     validated_payload["text"] = text[text.index("'text':")+8:] if EMBED_META else text
@@ -75,7 +81,7 @@ def upsert_sparse_data():
                     
                 points.append(
                     PointStruct(
-                        id=str(uuid.uuid4()), 
+                        id=p_id, 
                         vector={
                             "text": models.Document(
                                 text=text,

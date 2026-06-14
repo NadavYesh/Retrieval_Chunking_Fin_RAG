@@ -42,8 +42,16 @@ def get_fb_points(company_query, year, dataset_path=DEFAULT_DATASET_PATH):
         return []
 
 if __name__ == "__main__":
-    # Example usage:
-    # results = get_fb_points('3m', 2022)
-    # for r in results[:2]:
-    #     print(f"Q: {r['question']}")
-    pass
+    print("Example usage:")
+    results = get_fb_points('paypal', 2022)
+    # build df and save as excel
+    import pandas as pd
+    df = pd.DataFrame()
+    for r in results:
+        #print(f"Questions: {r['question']} \nAnswer: {r['answer']} \nEvidence: {r['evidence']}")
+        #df.merge(pd.DataFrame.from_dict(r))
+        df = pd.concat([df, pd.DataFrame.from_dict(r)])
+    print(df)
+    breakpoint()
+    df.to_excel("res2.xlsx")
+
