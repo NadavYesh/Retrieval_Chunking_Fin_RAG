@@ -6,8 +6,8 @@ from qdrant_client import models
 from qdrant_client.models import PointStruct
 
 from models import doc_payload
-from database import get_qdrant_client
-from utils import get_batches
+from db.database import get_qdrant_client
+from db.utils import get_batches
 
 client = get_qdrant_client()
 

@@ -3,7 +3,7 @@ import os
 import sys
 from pathlib import Path
 import uuid
-from metadata_extractor import get_meta_sec, sec_metadata
+from chunking.metadata_extractor import get_meta_sec, sec_metadata
 
 
 # # Robustly add the project root (parent of this file's directory) to sys.path
@@ -15,7 +15,7 @@ import pandas as pd
 import pickle
 # os.chdir("/Users/nadavsmacbookair/Desktop/Thesis/Code_old/algo/sec")
 
-from sec_processing import sec_to_mk, sec_splitter_headers, enrich_md_text, search_sec_bm25, sec_splitter_header_chars
+from chunking.sec_processing import sec_to_mk, sec_splitter_headers, enrich_md_text, search_sec_bm25, sec_splitter_header_chars
 # from evaluation.metrics import get_docs_from_metadata
 import os
 

@@ -3,20 +3,20 @@ import time
 from mlx_lm import load
 from sentence_transformers import SentenceTransformer
 from search_engine import search_agent, generate_llm_answer
-from extract_financebench_data import get_fb_points
+# from extract_financebench_data import get_fb_points
+from FinDER import run_finder
 #%%
 # configure
 
 # Default collection name
 # DEFAULT_COLL_NAME = "--split headers --embeddings text,meta"
-DEFAULT_COLL_NAME = "--split headers,chars --embeddings text,meta"
+DEFAULT_COLL_NAME = "--embedding embeddinggemma-300M --chunking-split headers"
 # Load models
 model, tokenizer, *extra = load("mlx-community/Llama-3.2-3B-Instruct-4bit")
 embed_model = SentenceTransformer("google/embeddinggemma-300M", device="mps")
 
 
 def run_evaluation(company_name, year):
-    # from trulens_eval import evaluate_trulens_response
     
     records = get_fb_points(company_name, year)
     filtered_pairs = [
@@ -52,33 +52,11 @@ def run_evaluation(company_name, year):
             answer, chunk_sources = generate_llm_answer(user_query, results_enhanced, model, tokenizer)
             print("\n--- LLM Answer : Enhanced Query---")
             print(answer)
-            
-
-            # print("\n--- Running TRULENS Evaluation ---")
-            # time.sleep(20)
-            # for now we stop with trulens
-            # scores = evaluate_trulens_response(user_query, answer, results)
-            # print("\n--- trulens Scores [0-1] ---")
-            # for metric, score in scores.items():
-            #     if metric not in ["question", "answer", "contexts"]: 
-            #         print(f"{metric.capitalize()}: {score}")
 
         if results_raw and results_raw.points:
             answer, chunk_sources = generate_llm_answer(user_query, results_raw, model, tokenizer)
             print("\n--- LLM Answer : Raw Query ---")
             print(answer)
-            
-
-
-            # print("\n--- Running TRULENS Evaluation ---")
-            # time.sleep(20)
-            # for now we stop with trulens
-            # scores = evaluate_trulens_response(user_query, answer, results)
-            # print("\n--- trulens Scores [0-1] ---")
-            # for metric, score in scores.items():
-            #     if metric not in ["question", "answer", "contexts"]: 
-            #         print(f"{metric.capitalize()}: {score}")
-
 
 
 if __name__ == "__main__":
