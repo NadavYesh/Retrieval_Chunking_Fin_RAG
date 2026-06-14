@@ -4,6 +4,8 @@ from typing import TypedDict, List, Optional, Dict, Any
 from langgraph.graph import StateGraph, END
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.memory import MemorySaver
+from FinDER import run_finder
+
 
 # Import existing logic from your search engine
 from search_engine import search_with_payload, generate_llm_answer, SYSTEM_PROMPT
@@ -33,6 +35,9 @@ def query_analyzer_node(state: GraphState, config: RunnableConfig):
     configurable = config.get("configurable", {})
     model = configurable.get("model")
     tokenizer = configurable.get("tokenizer")
+
+    print(f"\n--- NODE: query_analyzer_node ---")
+    print(f"Goal: Extracting financial metadata and optimizing the prompt for vector search.")
     
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
@@ -50,15 +55,22 @@ def query_analyzer_node(state: GraphState, config: RunnableConfig):
         data = json.loads(json_match.group())
         opt_query = data.pop("optimized_prompt", state["user_query"])
         
+        # Only allow specific keys for filtering to avoid Qdrant JSON path errors (e.g. spaces in keys)
+        allowed_filters = ["ticker", "year", "form_type"]
+        filters = {k: v for k, v in data.items() if k in allowed_filters}
+        
+        print(f"Extracted Ticker: {filters.get('ticker')} | Year: {filters.get('year')}")
+        print(f"Optimized Query: {opt_query[:100]}...")
+
         return {
             "optimized_query": opt_query,
-            "ticker": data.get("ticker"),
-            "year": data.get("year"),
-            "filters": data,
+            "ticker": filters.get("ticker"),
+            "year": filters.get("year"),
+            "filters": filters,
             "retries": state.get("retries", 0)
         }
     except Exception as e:
-        return {"error": str(e), "optimized_query": state["user_query"]}
+        return {"error": str(e), "optimized_query": state["user_query"], "filters": {}}
 
 def retriever_node(state: GraphState, config: RunnableConfig):
     """
@@ -72,20 +84,26 @@ def retriever_node(state: GraphState, config: RunnableConfig):
     embed_model = configurable.get("embed_model")
     coll_name = configurable.get("coll_name")
     
+    print(f"\n--- NODE: retriever_node ---")
+    print(f"Goal: Fetching top-5 relevant chunks from Qdrant collection: {coll_name}")
+
     # Embed the optimized prompt
-    query_vec = embed_model.encode(state["optimized_query"]).tolist()
-    
+    query_vec = embed_model.encode(state["optimized_query"],
+                                   prompt_name="Retrieval-query").tolist()
+
     # Use existing search_with_payload logic
     results = search_with_payload(
         coll_name=coll_name,
         query_vec=query_vec,
         payload_must=state["filters"]
     )
-    for res in result:
-        print(res)
-
-
     
+    # results is typically a QueryResponse object; iterate over its points
+    if hasattr(results, "points"):
+        print(f"Retrieved {len(results.points)} points from the database.")
+        for res in results.points:
+            print(res)
+
     return {"retrieved_results": results}
 
 def document_grader_node(state: GraphState, config: RunnableConfig):
@@ -102,17 +120,21 @@ def document_grader_node(state: GraphState, config: RunnableConfig):
     tokenizer = configurable.get("tokenizer")
 
     # Simple relevance check logic
-    context = " ".join([p.payload.get("text", "") for p in state["retrieved_results"].points])
-    grading_prompt = f"System: Is this context relevant to the question: '{state['user_query']}'? Respond with YES or NO.\nContext: {context[:500]}"
+    context_snippet = " ".join([p.payload.get("text", "") for p in state["retrieved_results"].points])[:1000]
     
+    messages = [
+        {"role": "system", "content": "You are a grader evaluating the relevance of a retrieved document to a user question. Respond ONLY with 'YES' if the document is relevant, or 'NO' if it is not."},
+        {"role": "user", "content": f"Question: {state['user_query']}\n\nDocument Context: {context_snippet}"}
+    ]
+    grading_prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+
     print(f"--- GRADER: Evaluating relevance for query: {state['user_query'][:60]}... ---")
-    # In a real app, use a specific grading prompt template
     response = generate(model, tokenizer, prompt=grading_prompt, verbose=False).upper()
     print(f"--- GRADER: Raw LLM response: {response.strip()} ---")
     
     if "YES" in response:
         print("--- GRADER: Document deemed RELEVANT ---")
-        return {"error": None}
+        return {"error": None} # Successfully cleared error
     else:
         print("--- GRADER: Document deemed NOT RELEVANT ---")
         return {"error": "irrelevant_context", "retries": state.get("retries", 0) + 1}
@@ -130,7 +152,10 @@ def decide_to_generate(state: GraphState):
 
 def rewrite_query_node(state: GraphState, config: RunnableConfig):
     """Node to slightly modify the search query if the first attempt failed."""
-    return {"optimized_query": f"detailed financial breakdown of {state['user_query']}"}
+    return {
+        "optimized_query": f"detailed financial breakdown and SEC filing data for {state['user_query']}",
+        "error": None # Clear the error so the next retrieval node isn't skipped
+    }
 
 def generator_node(state: GraphState, config: RunnableConfig):
     """
@@ -138,6 +163,9 @@ def generator_node(state: GraphState, config: RunnableConfig):
     """
     if not state.get("retrieved_results") or not state["retrieved_results"].points:
         return {"answer": "No relevant financial data found for the specified parameters."}
+
+    print(f"\n--- NODE: generator_node ---")
+    print(f"Goal: Synthesizing a final answer using the retrieved context.")
 
     configurable = config.get("configurable", {})
     model = configurable.get("model")
@@ -153,24 +181,20 @@ def generator_node(state: GraphState, config: RunnableConfig):
     
     return {"answer": answer, "sources": chunk_sources}
 
-def create_financial_rag_graph():
+def create_advanced_financial_rag_graph():
     """
-    Builds the state machine.
+    Builds the full state machine including grading, rewriting, and generation.
     """
     workflow = StateGraph(GraphState)
-
-    # Add Nodes
     workflow.add_node("analyze_query", query_analyzer_node)
     workflow.add_node("retrieve", retriever_node)
     workflow.add_node("grade_documents", document_grader_node)
     workflow.add_node("rewrite_query", rewrite_query_node)
     workflow.add_node("generate", generator_node)
 
-    # Define Edges (The Flow)
     workflow.set_entry_point("analyze_query")
     workflow.add_edge("analyze_query", "retrieve")
     workflow.add_edge("retrieve", "grade_documents")
-    
     workflow.add_conditional_edges(
         "grade_documents",
         decide_to_generate,
@@ -178,77 +202,73 @@ def create_financial_rag_graph():
     )
     workflow.add_edge("rewrite_query", "retrieve")
     workflow.add_edge("generate", END)
+    return workflow.compile(checkpointer=MemorySaver())
 
-    # We add interrupt_before to pause the graph before retrieval
-    # This allows a human to inspect 'ticker' and 'year' in the state.
-    return workflow.compile(
-        checkpointer=MemorySaver(),
-        interrupt_before=["retrieve"])
+def create_simple_financial_rag_graph():
+    """
+    Builds a streamlined graph: Start -> Analyze -> Retrieve -> End.
+    Useful for evaluating retrieval performance.
+    """
+    workflow = StateGraph(GraphState)
+    workflow.add_node("analyze_query", query_analyzer_node)
+    workflow.add_node("retrieve", retriever_node)
+
+    workflow.set_entry_point("analyze_query")
+    workflow.add_edge("analyze_query", "retrieve")
+    workflow.add_edge("retrieve", END)
+    return workflow.compile(checkpointer=MemorySaver())
 
 # --- Example Usage ---
 if __name__ == "__main__":
     from mlx_lm import load
     from sentence_transformers import SentenceTransformer
-    from extract_financebench_data import get_fb_points
     
-    # Setup (simplified version of run_rag_pipeline.py config)
     print("Loading models...")
     model, tokenizer, *_ = load("mlx-community/Llama-3.2-3B-Instruct-4bit")
     embed_model = SentenceTransformer("google/embeddinggemma-300M", device="mps")
-    
-    # 1. Fetch the same data used in run_rag_pipeline.py
-    company = "bestbuy"
-    year = 2023
-    records = get_fb_points(company, year)
-    
-    if not records:
-        print(f"No records found for {company} {year}")
+    #%%
+    # 1. Fetch data from FinDER and take first 10 points
+    finder_df = run_finder()
+    #%%
+    if finder_df.empty:
+        print("No records found in FinDER.")
         exit()
-
-    # Take the first question to demonstrate the pipeline
-    test_record = records[0]
-    user_query = test_record["question"]
-    ref_answer = test_record["answer"]
-
-    print(f"\nTarget Question: {user_query}")
-    print(f"Reference Answer: {ref_answer}")
-
-    app = create_financial_rag_graph()
     
+    # choose size of test data
+    test_data = finder_df.head(5)
+
+    # 2. Use the simplified graph
+    # app = create_simple_financial_rag_graph()
+    app = create_advanced_financial_rag_graph()
+
     pipeline_config = {
         "model": model, 
         "tokenizer": tokenizer, 
         "embed_model": embed_model,
-        "coll_name": "--split headers,chars --embeddings text,meta"
+        "coll_name": "--embedding embeddinggemma-300M --chunking-split headers"
     }
-    
-    initial_state = {"user_query": user_query, "retries": 0}
-    
-    # Thread ID allows the checkpointer to save this specific conversation
-    thread_config = {"configurable": {**pipeline_config, "thread_id": "eval_1"}}
-    
-    print("\n--- Phase 1: Query Analysis ---")
-    # Run the graph until the first breakpoint
-    app.invoke(initial_state, config=thread_config)
-    
-    # Fetch the state at the breakpoint
-    snapshot = app.get_state(thread_config)
-    extracted_ticker = snapshot.values.get("ticker")
-    extracted_year = snapshot.values.get("year")
 
-    print(f"\n[HUMAN CHECK] Extracted Ticker: {extracted_ticker}, Year: {extracted_year}")
-    confirm = input("Does this look correct? (y/n): ")
+    # 3. Execution loop:
+    for i, (idx, row) in enumerate(test_data.iterrows()): #idx is the row id from the df
+        user_query = row["text"]
+        print(f"\n{'='*50}")
+        print(f"STARTING EVALUATION: FinDER Query {i+1}") #just a print
+        print(f"User Request: {user_query}")
+        
+        initial_state = {"user_query": user_query, "retries": 0}
+        thread_config = {"configurable": {**pipeline_config, "thread_id": f"finder_eval_{i}"}}
 
-    if confirm.lower() != 'y':
-        print("Aborting pipeline.")
-        exit()
+        # reak pipeline
+        final_output = app.invoke(initial_state, config=thread_config)
 
-    print("\n--- Phase 2: Retrieval and Generation ---")
-    # Passing None as the first argument tells LangGraph to resume from the checkpoint
-    final_output = app.invoke(None, config=thread_config)
-
-    print("\n--- FINAL ANSWER ---")
-    print(final_output.get("answer"))
-    
-    print("\n--- METADATA EXTRACTED ---")
-    print(f"Ticker: {final_output.get('ticker')}, Year: {final_output.get('year')}")
+        print("\n--- FINAL EVALUATION SUMMARY ---")
+        print("Below are the top snippets used for this retrieval:")
+        results = final_output.get("retrieved_results")
+        if results and results.points:
+            for p in results.points:
+                print(f"ID: {p.id} | Score: {p.score:.4f}")
+                print(f"Metadata: Ticker={p.payload.get('ticker')}, Year={p.payload.get('fiscal_year_end')}")
+                print(f"Snippet: {p.payload.get('text', '')[:250]}...")
+                print("-" * 15)
+        else:
+            print("No relevant points retrieved for this query.")
