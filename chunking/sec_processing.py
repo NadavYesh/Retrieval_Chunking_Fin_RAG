@@ -52,8 +52,8 @@ def enrich_md_text(md_text):
 
     part_re = re.compile(r"^\*\*\s*(PART\s+(?:I|II|III|IV))\s*\*\*\s*$", re.IGNORECASE)
     item_re = re.compile(r"^\*\*\s*(Item\s+\d+[A-Za-z]?(?:\.[^*]+)?)\s*\*\*\s*$", re.IGNORECASE)
-    triple_bold_re = re.compile(r"^\*\*\*\s*(.+?)\s*\*\*\*$")
-    double_bold_re = re.compile(r"^\*\*\s*(.+?)\s*\*\*$")
+    triple_bold_re = re.compile(r"^\s*\*\*\*\s*(.+?)\s*\*\*\*\s*$", re.IGNORECASE)
+    double_bold_re = re.compile(r"^\s*\*\*\s*(.+?)\s*\*\*\s*$", re.IGNORECASE)
 
     out_lines = []
     for line in body.splitlines():
@@ -70,12 +70,12 @@ def enrich_md_text(md_text):
 
         m_triple = triple_bold_re.match(stripped)
         if m_triple:
-            out_lines.append(f"#### {m_triple.group(1)}")
+            out_lines.append(f"### {m_triple.group(1)}")
             continue
 
         m_double = double_bold_re.match(stripped)
         if m_double:
-            out_lines.append(f"### {m_double.group(1)}")
+            out_lines.append(f"### {m_double.group(1)}") 
             continue
 
         out_lines.append(line)
