@@ -25,62 +25,128 @@ def sec_to_mk(html_content):
 
 def enrich_md_text(md_text):
     """
-    Enrich SEC-derived Markdown by converting emphasized section markers to headings.
+    Enrich SEC-derived Markdown by converting section markers and emphasized text to headings.
 
-    Applies heading normalization to the body text line-by-line:
-    - **PART I|II|III|IV** -> # PART ...
-    - **Item X...** -> ## Item ...
-    - ***text*** -> #### text
-    - **text** -> ### text
-
-    Args:
-        md_text (str): Raw Markdown text.
-
-    Returns:
-        str: Markdown text with standardized heading levels.
+    Handles:
+    - PART I|II|III|IV (Standalone or in tables)
+    - Item X... (Standalone or in tables)
+    - **Bold standalone lines** -> ### Heading
+    - Short, Title Case standalone lines -> ### Heading
+    - **Run-in headers.** Text -> #### Run-in header
     """
+    if not md_text:
+        return ""
+
+    # Normalize line endings
+    md_text = md_text.replace('\r\n', '\n').replace('\r', '\n')
+    
+    # Identify the end of the Table of Contents to avoid enriching TOC entries
+    # Use a more robust search that doesn't strictly require newlines for the split
     toc_match = re.search(r"(?im)^\s*(table of contents|contents)\s*$", md_text)
     if toc_match:
         split_idx = md_text.find("\n", toc_match.end())
         if split_idx == -1:
-            return md_text
-        prefix = md_text[:split_idx + 1]
-        body = md_text[split_idx + 1:]
+            # If no newline after TOC, try to split at a reasonable distance or just take the whole thing
+            prefix = md_text[:toc_match.end()]
+            body = md_text[toc_match.end():]
+        else:
+            prefix = md_text[:split_idx + 1]
+            body = md_text[split_idx + 1:]
     else:
         prefix = ""
         body = md_text
 
-    part_re = re.compile(r"^\*\*\s*(PART\s+(?:I|II|III|IV))\s*\*\*\s*$", re.IGNORECASE)
-    item_re = re.compile(r"^\*\*\s*(Item\s+\d+[A-Za-z]?(?:\.[^*]+)?)\s*\*\*\s*$", re.IGNORECASE)
-    triple_bold_re = re.compile(r"^\s*\*\*\*\s*(.+?)\s*\*\*\*\s*$", re.IGNORECASE)
-    double_bold_re = re.compile(r"^\s*\*\*\s*(.+?)\s*\*\*\s*$", re.IGNORECASE)
+    # Regex definitions
+    # Standalone Part/Item (Optional bolding, optional trailing punctuation)
+    part_re = re.compile(r"^\s*(?:\*\*)?\s*(PART\s+(?:I|II|III|IV))\b\s*(.*?)(?:\*\*)?\s*$", re.I)
+    item_re = re.compile(r"^\s*(?:\*\*)?\s*(ITEM\s+\d+[A-Z]?)(?:\.|\b)\s*(.*?)(?:\*\*)?\s*$", re.I)
+    
+    # Table-based Part/Item: | Item 1 | Business | or | PART I | |
+    table_part_re = re.compile(r"^\s*\|\s*(PART\s+(?:I|II|III|IV))\b\s*\|\s*([^|]*?)\s*(?:\||$)", re.I)
+    table_item_re = re.compile(r"^\s*\|\s*(ITEM\s+\d+[A-Z]?)(?:\.|\b)\s*\|\s*([^|]*?)\s*(?:\||$)", re.I)
+    
+    # Other header markers
+    triple_bold_re = re.compile(r"^\s*\*\*\*\s*(.+?)\s*\*\*\*\s*$", re.I)
+    double_bold_re = re.compile(r"^\s*\*\*\s*(.+?)\s*\*\*\s*$", re.I)
+    
+    # Run-in header heuristic: **Subheader.** Some text...
+    runin_re = re.compile(r"^\s*\*\*\s*([^.*]{3,60}?)\.?\s*\*\*\s+(.+)$")
 
+    lines = body.splitlines()
     out_lines = []
-    for line in body.splitlines():
+    
+    for i, line in enumerate(lines):
         stripped = line.strip()
-        m_part = part_re.match(stripped)
-        if m_part:
-            out_lines.append(f"# {m_part.group(1).upper()}")
+        if not stripped:
+            out_lines.append(line)
+            continue
+            
+        # Skip if already a header
+        if stripped.startswith("#"):
+            out_lines.append(line)
             continue
 
-        m_item = item_re.match(stripped)
-        if m_item:
-            out_lines.append(f"## {m_item.group(1)}")
+        # 1. Check Table-based Markers (Common in Intel)
+        m_tp = table_part_re.match(stripped)
+        if m_tp:
+            out_lines.append(f"# {m_tp.group(1).upper()} {m_tp.group(2).strip()}")
+            continue
+        m_ti = table_item_re.match(stripped)
+        if m_ti:
+            out_lines.append(f"## {m_ti.group(1).upper()} {m_ti.group(2).strip()}")
             continue
 
+        # 2. Check Standalone Part/Item (Common in BBY/AMZN)
+        m_p = part_re.match(stripped)
+        if m_p:
+            out_lines.append(f"# {m_p.group(1).upper()} {m_p.group(2).strip()}")
+            continue
+        m_i = item_re.match(stripped)
+        if m_i:
+            out_lines.append(f"## {m_i.group(1).upper()} {m_i.group(2).strip()}")
+            continue
+
+        # 3. Triple Bold Standalone
         m_triple = triple_bold_re.match(stripped)
         if m_triple:
             out_lines.append(f"### {m_triple.group(1)}")
             continue
 
+        # 4. Double Bold Standalone
         m_double = double_bold_re.match(stripped)
         if m_double:
-            out_lines.append(f"### {m_double.group(1)}") 
+            # Check if it's a known non-header (e.g. signature names)
+            content = m_double.group(1)
+            if len(content) < 100:
+                out_lines.append(f"### {content}")
+                continue
+
+        # 5. Run-in header (#### Level)
+        m_runin = runin_re.match(stripped)
+        if m_runin:
+            out_lines.append(f"#### {m_runin.group(1)}")
+            out_lines.append("")
+            out_lines.append(m_runin.group(2))
             continue
+
+        # 6. Floating Header Heuristic (Plain text, short, Title Case, standalone)
+        # Check context
+        prev_empty = (i == 0 or not lines[i-1].strip())
+        next_empty = (i == len(lines)-1 or not lines[i+1].strip())
+        if prev_empty and next_empty and 3 < len(stripped) < 80 and stripped[0].isupper() and not stripped.endswith('.'):
+            # Verify Title Case (majority of words start with upper)
+            words = [w for w in stripped.split() if w.isalpha()]
+            if words:
+                upper_words = [w for w in words if w[0].isupper()]
+                if len(upper_words) / len(words) > 0.6:
+                    out_lines.append(f"### {stripped}")
+                    continue
 
         out_lines.append(line)
 
-    return prefix + "\n".join(out_lines)
+    # Rejoin and fix double-empty lines that might have been introduced
+    result = prefix + "\n".join(out_lines)
+    return re.sub(r'\n{3,}', '\n\n', result)
 
 
 
