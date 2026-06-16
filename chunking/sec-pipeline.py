@@ -3,21 +3,19 @@ import os
 import sys
 from pathlib import Path
 import uuid
-from chunking.metadata_extractor import get_meta_sec, sec_metadata
-
-
-# # Robustly add the project root (parent of this file's directory) to sys.path
+import pandas as pd
+import pickle
 # PROJECT_ROOT = Path(__file__).resolve().parents[1]
 # if str(PROJECT_ROOT) not in sys.path:
 #     sys.path.insert(0, str(PROJECT_ROOT))
+# breakpoint()
+#from chunking.metadata_extractor import get_meta_sec, sec_metadata
+#from chunking.sec_processing import sec_to_mk, sec_splitter_headers, enrich_md_text, search_sec_bm25, sec_splitter_header_chars
+from metadata_extractor import get_meta_sec, sec_metadata
+from sec_processing import sec_to_mk, sec_splitter_headers, enrich_md_text, search_sec_bm25, sec_splitter_header_chars
 
-import pandas as pd
-import pickle
-# os.chdir("/Users/nadavsmacbookair/Desktop/Thesis/Code_old/algo/sec")
 
-from chunking.sec_processing import sec_to_mk, sec_splitter_headers, enrich_md_text, search_sec_bm25, sec_splitter_header_chars
-# from evaluation.metrics import get_docs_from_metadata
-import os
+
 
 #%%
 
@@ -41,6 +39,7 @@ def sec_chunking_pipeline(html_path, corpus_path, MD_PATH,
     mk_file = sec_to_mk(html_content)
     
     # enrich with header
+
     mk_file = enrich_md_text(mk_file)
 
     with open(MD_PATH, 'w', encoding='utf-8') as f:
@@ -74,10 +73,13 @@ def sec_chunking_pipeline(html_path, corpus_path, MD_PATH,
 #%%
 
 if __name__ == "__main__":
-    RAW_FILES = os.listdir("/Users/nadavsmacbookair/Desktop/Thesis/data/html/indexed at 13-5-26")
-    RAW_FILES = [f for f in RAW_FILES if f.endswith(".html")]
+    #RAW_FILES = os.listdir("/Users/nadavsmacbookair/Desktop/Thesis/data/html/indexed at 13-5-26")
+    #RAW_FILES = [f for f in RAW_FILES if f.endswith(".html")]
+    RAW_FILES = ["INTC_10K_2020_no_enrich.html"]
+
     print(RAW_FILES)
-    path_names = [os.path.join("/Users/nadavsmacbookair/Desktop/Thesis/data/html/indexed at 13-5-26",f)for f in RAW_FILES]
+    #path_names = [os.path.join("/Users/nadavsmacbookair/Desktop/Thesis/data/html/indexed at 13-5-26",f)for f in RAW_FILES]
+    path_names = ["/Users/nadavsmacbookair/Desktop/Thesis/data/html/indexed at 13-5-26/INTC_10K_2020_no_enrich.html"]
     for (path,name) in zip(path_names,RAW_FILES):
         name = name[:-5]
         
