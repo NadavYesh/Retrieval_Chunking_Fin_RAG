@@ -12,7 +12,7 @@ import pickle
 #from chunking.metadata_extractor import get_meta_sec, sec_metadata
 #from chunking.sec_processing import sec_to_mk, sec_splitter_headers, enrich_md_text, search_sec_bm25, sec_splitter_header_chars
 from metadata_extractor import get_meta_sec, sec_metadata
-from sec_processing import sec_to_mk, sec_splitter_headers, enrich_md_text, search_sec_bm25, sec_splitter_header_chars
+from sec_processing import sec_to_mk, sec_splitter_headers, enrich_md_text, search_sec_bm25, sec_splitter_header_chars, inject_header_placeholders
 
 
 
@@ -41,6 +41,9 @@ def sec_chunking_pipeline(html_path, corpus_path, MD_PATH,
     # enrich with header
 
     mk_file = enrich_md_text(mk_file)
+
+    # inject headers placeholders to not neglect consecutive headers
+    mk_file = inject_header_placeholders(mk_file)
 
     with open(MD_PATH, 'w', encoding='utf-8') as f:
         f.write(mk_file)
@@ -73,37 +76,24 @@ def sec_chunking_pipeline(html_path, corpus_path, MD_PATH,
 #%%
 
 if __name__ == "__main__":
-    #RAW_FILES = os.listdir("/Users/nadavsmacbookair/Desktop/Thesis/data/html/indexed at 13-5-26")
+    #RAW_FILES = os.listdir("/Users/nadavsmacbookair/Desktop/Thesis/data/html/indexed at 13-6-26")
     #RAW_FILES = [f for f in RAW_FILES if f.endswith(".html")]
-    RAW_FILES = ["INTC_10K_2020_no_enrich.html"]
+    RAW_FILES = ["IFF_10K_2023_copy.html"]
 
     print(RAW_FILES)
-    #path_names = [os.path.join("/Users/nadavsmacbookair/Desktop/Thesis/data/html/indexed at 13-5-26",f)for f in RAW_FILES]
-    path_names = ["/Users/nadavsmacbookair/Desktop/Thesis/data/html/indexed at 13-5-26/INTC_10K_2020_no_enrich.html"]
+    #path_names = [os.path.join("/Users/nadavsmacbookair/Desktop/Thesis/data/html/indexed at 13-6-26",f)for f in RAW_FILES]
+    path_names = ["/Users/nadavsmacbookair/Desktop/Thesis/data/html/indexed at 13-6-26/IFF_10K_2023_copy.html"]
     for (path,name) in zip(path_names,RAW_FILES):
         name = name[:-5]
         
 
         # CORPUS_PATH_header_split = f"/Users/nadavsmacbookair/Desktop/Thesis/Code_old/data/Corpus/{name}-Chunks-headers_split.pkl"
-        CORPUS_PATH_header_split = f"/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/chunks/indexed-at-13-06-26/headers_split/{name}.pkl"
-        CORPUS_PATH_header_char_split = f"/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/chunks/indexed-at-13-06-26/headers_chars_split/{name}.pkl"
-        MD_PATH = f"/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/md/indexed-at-13-06-26/{name}.md"
+        CORPUS_PATH_header_split = f"/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/chunks/indexed-at-16-06-26/headers_split/{name}.pkl"
+        CORPUS_PATH_header_char_split = f"/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/chunks/indexed-at-16-06-26/headers_chars_split/{name}.pkl"
+        MD_PATH = f"/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/md/indexed-at-16-06-26/{name}.md"
         corpus_header_split = sec_chunking_pipeline(path, CORPUS_PATH_header_split, MD_PATH, method = "head")
         corpus_header_char_split = sec_chunking_pipeline(path, CORPUS_PATH_header_char_split, MD_PATH, method="head_and_chars")
-            # SEARCH
-            # Q_A_fb = pd.read_json("/Users/nadavsmacbookair/Documents/sec2md/financebench/data/financebench_open_source.jsonl",lines=True)
 
-            # QA_subset = Q_A_fb[Q_A_fb['doc_name']==name]
-            # questions = QA_subset["question"]
-            # res = []
-            # scores = []
-            # for q in questions:
-            #     RES = search_sec_bm25(q, corpus, k=2)
-            #     res.append(RES[0])
-            #     scores.append(RES[1])
-            #     print(f"\n\n\n ************************* \n q:{q}")
-            #     print(f"res:{RES[0]}")
-            #     print(f"scores:{RES[1]}")
 
 
 #%%
@@ -117,3 +107,8 @@ if __name__ == "__main__":
 #         print(corpus)
 # # %%
 # corpus.iloc[140].metadata
+
+#%% look at NEM_10K_2023.pkl
+import pickle
+with open ("/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/chunks/indexed-at-16-06-26/headers_split/NEM_10K_2023.pkl", 'rb') as f:
+    corpus = pickle.load(f)

@@ -150,6 +150,59 @@ def enrich_md_text(md_text):
 
 
 
+def inject_header_placeholders(markdown: str) -> str:
+    """
+    ########## Solution to ignored headers problem ################
+    Inject a placeholder line after any header that has no immediate content
+    (i.e. next non-empty line is another header).
+    """
+    lines = markdown.split("\n")
+    result = []
+    header_pattern = re.compile(r"^(#{1,4}) (.+)")
+    i = 0
+
+    while i < len(lines):
+        line = lines[i]
+        match = header_pattern.match(line)
+
+        if match:
+            level = match.group(1)   # e.g. "###"
+            title = match.group(2)   # e.g. "Thesis Project"
+
+            # Collect consecutive same-level headers
+            titles = [title]
+            j = i + 1
+            while j < len(lines):
+                next_line = lines[j]
+                if not next_line.strip():
+                    j += 1
+                    continue  # skip blank lines between headers
+                next_match = header_pattern.match(next_line)
+                if next_match and next_match.group(1) == level:
+                    titles.append(next_match.group(2))
+                    j += 1
+                else:
+                    break
+
+            # Emit a single concatenated header
+            concatenated = f"{level} {' | '.join(titles)}"
+            result.append(concatenated)
+            i = j  # skip past all consumed headers
+
+            # Check if this concatenated header also has no content
+            next_content = next(
+                (lines[k] for k in range(i, len(lines)) if lines[k].strip()),
+                None
+            )
+            if next_content is None or header_pattern.match(next_content):
+                result.append("<!-- header-only -->")
+
+        else:
+            result.append(line)
+            i += 1
+
+    return "\n".join(result)
+    
 ############# SECTION: MARKDOWN TO CHUNKS ##################################
 def sec_splitter_headers(doc):
     """
