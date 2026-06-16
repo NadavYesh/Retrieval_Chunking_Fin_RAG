@@ -12,7 +12,7 @@ import pickle
 #from chunking.metadata_extractor import get_meta_sec, sec_metadata
 #from chunking.sec_processing import sec_to_mk, sec_splitter_headers, enrich_md_text, search_sec_bm25, sec_splitter_header_chars
 from metadata_extractor import get_meta_sec, sec_metadata
-from sec_processing import sec_to_mk, sec_splitter_headers, enrich_md_text, search_sec_bm25, sec_splitter_header_chars, inject_header_placeholders
+from sec_processing import sec_to_mk, sec_splitter_headers, enrich_md_text, search_sec_bm25, sec_splitter_chars, inject_header_placeholders, collapse_double_newlines
 
 
 
@@ -44,6 +44,7 @@ def sec_chunking_pipeline(html_path, corpus_path, MD_PATH,
 
     # inject headers placeholders to not neglect consecutive headers
     mk_file = inject_header_placeholders(mk_file)
+    
 
     with open(MD_PATH, 'w', encoding='utf-8') as f:
         f.write(mk_file)
@@ -55,7 +56,8 @@ def sec_chunking_pipeline(html_path, corpus_path, MD_PATH,
         chunks = sec_splitter_headers(mk_file)
     elif method == "head_and_chars":
         print("Splitting into headers and chars chunks...")
-        chunks = sec_splitter_header_chars(doc = mk_file, chunk_size=800, chunk_overlap=200)
+        header_chunks = sec_splitter_headers(mk_file)
+        chunks = sec_splitter_chars(doc = header_chunks, chunk_size=400, chunk_overlap=40)
 
     # convert chunks from langchanin list of document objects into DataFrame
     chunks_df = pd.DataFrame([
@@ -78,11 +80,11 @@ def sec_chunking_pipeline(html_path, corpus_path, MD_PATH,
 if __name__ == "__main__":
     #RAW_FILES = os.listdir("/Users/nadavsmacbookair/Desktop/Thesis/data/html/indexed at 13-6-26")
     #RAW_FILES = [f for f in RAW_FILES if f.endswith(".html")]
-    RAW_FILES = ["IFF_10K_2023_copy.html"]
+    RAW_FILES = ["BBY_10K_2024_copy.html"]
 
     print(RAW_FILES)
     #path_names = [os.path.join("/Users/nadavsmacbookair/Desktop/Thesis/data/html/indexed at 13-6-26",f)for f in RAW_FILES]
-    path_names = ["/Users/nadavsmacbookair/Desktop/Thesis/data/html/indexed at 13-6-26/IFF_10K_2023_copy.html"]
+    path_names = ["/Users/nadavsmacbookair/Desktop/Thesis/data/html/indexed at 13-6-26/BBY_10K_2024_copy.html"]
     for (path,name) in zip(path_names,RAW_FILES):
         name = name[:-5]
         
@@ -109,6 +111,8 @@ if __name__ == "__main__":
 # corpus.iloc[140].metadata
 
 #%% look at NEM_10K_2023.pkl
-import pickle
-with open ("/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/chunks/indexed-at-16-06-26/headers_split/NEM_10K_2023.pkl", 'rb') as f:
-    corpus = pickle.load(f)
+# import pickle
+# with open ("/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/chunks/indexed-at-16-06-26/headers_split/BBY_10K_2024_copy.pkl", 'rb') as f:
+#     corpus_headers = pickle.load(f)
+# with open ("/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/chunks/indexed-at-16-06-26/headers_chars_split/BBY_10K_2024_copy.pkl", 'rb') as f:
+#     corpus_headers_chars = pickle.load(f)

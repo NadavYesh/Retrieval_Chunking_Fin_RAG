@@ -202,7 +202,8 @@ def inject_header_placeholders(markdown: str) -> str:
             i += 1
 
     return "\n".join(result)
-    
+
+
 ############# SECTION: MARKDOWN TO CHUNKS ##################################
 def sec_splitter_headers(doc):
     """
