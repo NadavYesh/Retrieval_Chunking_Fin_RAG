@@ -233,51 +233,18 @@ def sec_splitter_headers(doc):
     header_chunks = header_splitter.split_text(doc)
     return(header_chunks)
 
-def sec_splitter_header_chars(doc, chunk_size=800, chunk_overlap=200):
-    """
-    Performs a hierarchical split on SEC Markdown documents.
-
-    1. Header Splitting: Segments by Markdown headers (#, ##, ###).
-    2. Character Splitting: Sub-divides large sections into smaller chunks.
-
-    Args:
-        doc (str): The Markdown-formatted SEC filing text.
-        chunk_size (int): Max characters per chunk.
-        chunk_overlap (int): Character overlap between chunks.
-
-    Returns:
-        list[Document]: A list of LangChain Document objects with metadata.
-    """
+def sec_splitter_chars(doc, chunk_size=800, chunk_overlap=200):
+    '''
+    This function takes an extended approach. Instead using char splitter in a raw manner, we use langchain's .create_documents, a way to parse 
+    the document in prose-like fashion, This will allow us to break tables and keep their headers.
+    '''
     # making sure tables are not split- never
     # table = starts with "|" and ends with "/n/n" 
+    import tiktoken
+    enc = tiktoken.encoding_for_model("text-embedding-3-small") # a whatever model
+    table_pattern = re.compile(r'(\|.+\|\n)+(\|[-| :]+\|\n)(\|.+\|\n)*',re.MULTILINE)
 
-    header_splitter = MarkdownHeaderTextSplitter(
-        headers_to_split_on=[
-            ("#", "section"),
-            ("##", "subsection"),
-            ("###", "item"),
-            ("####", "subitem")
-            
-        ]
-    )
-    header_chunks = header_splitter.split_text(doc)
-    char_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=chunk_size,
-        chunk_overlap=chunk_overlap,
-        separators=[
-            "\n\n",   # Double newline (paragraph break)
-            "\n",     # Single newline
-            " ",      # Space
-            "\u200b", # Zero-width space
-            "\uff0c", # Fullwidth comma ，
-            "\u3001", # Ideographic comma 、
-            "\uff0e", # Fullwidth full stop ．
-            "\u3002", # Ideographic full stop 。
-            "",       # Empty string (character-level fallback)
-        ],
-        length_function = len)
-    final_chunks = char_splitter.split_documents(header_chunks)
-    return final_chunks
+    
 
 
 def search_sec_bm25(query, corpus_df, k=5):

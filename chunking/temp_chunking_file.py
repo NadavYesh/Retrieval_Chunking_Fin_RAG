@@ -1,13 +1,17 @@
 import re
 from typing import Optional
 from langchain_core.documents import Document
+from sec_processing import sec_splitter_headers
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 
 # Matches a full markdown table: one or more pipe rows, then a separator row, then data rows
+grp = r'(?:\|.+\|\n)+\|[-| :]+\|\n(?:\|.+\|\n)'
 TABLE_PATTERN = re.compile(
-    r'(?P<table>(?:\|.+\|\n)+\|[-| :]+\|\n(?:\|.+\|\n)*)',
+    # ?P<table> says- name this group as table. 
+    rf'(?P<table>{grp}*)', 
     re.MULTILINE
-)
+    )
 
 
 def _count_tokens(text: str, length_function) -> int:
@@ -42,11 +46,11 @@ def _parse_table(table_text: str) -> tuple[list[str], list[list[str]]]:
         #  \| is a special regex character for a tube 
         # [-| :]+ any of contained chars, one or more of them!!
 
-        # Separator row: only dashes, pipes, colons, spaces
+        # Detect separator row
         if re.match(r'^\|[-| :]+\|$', line.strip()):
             separator_idx = i
             break
-    
+    ## end for
     if separator_idx is None:
         # No separator found, treat entire table as header (won't be split)
         return lines, []
@@ -64,7 +68,7 @@ def split_large_table(
     table_text: str,
     caption: str,
     metadata: dict,
-    budget: int,
+    budget: int, # allowance length
     length_function,
 ) -> list[Document]:
     """
@@ -142,21 +146,21 @@ def split_chunk_with_table_awareness(
     Returns:
         List of Documents, all inheriting `doc.metadata`.
     """
-    text = doc.page_content
+    text = doc.page_content #chunk.page_content is the text. 
     metadata = doc.metadata
-    result: list[Document] = []
+    result: list[Document] = [] # doc list
 
     last_end = 0
+    # finiter is a re object
     for match in TABLE_PATTERN.finditer(text): # when table detected
-        start, end = match.start(), match.end()
-
+        start, end = match.start(), match.end() # match is re-type object
         # --- Prose segment before the table ---
-        prose_before = text[last_end:start]
-        if prose_before.strip():
+        prose_before = text[last_end:start] #this is from chunk start to start of table, and then from end of last detected table to start of new
+        if prose_before.strip(): #
             sub_docs = char_splitter.create_documents(
                 [prose_before], metadatas=[metadata]
             )
-            result.extend(sub_docs)
+            result.extend(sub_docs) # append would give nested list if a document is split into more than 1 chunk
 
         # --- Caption: last non-empty line before this table ---
         caption = _get_caption(text[last_end:start])
@@ -164,7 +168,7 @@ def split_chunk_with_table_awareness(
         # --- Table itself ---
         table_text = match.group("table")
         full_table_with_caption = (caption + "\n" if caption else "") + table_text
-        table_tokens = _count_tokens(full_table_with_caption, length_function)
+        table_tokens = _count_tokens(full_table_with_caption, length_function) # evaluate length
 
         if table_tokens <= budget:
             # Fits whole: emit as single atomic chunk
@@ -196,7 +200,7 @@ def split_chunk_with_table_awareness(
 
 
 def chunk_document(
-    doc_text: str,
+    doc,
     header_splitter,
     char_splitter,
     budget: int,
@@ -205,13 +209,13 @@ def chunk_document(
     """
     Full pipeline: header split → table-aware char split.
     """
-    header_chunks = header_splitter.split_text(doc_text)
+    header_chunks = header_splitter(doc)
     all_chunks: list[Document] = []
 
     for chunk in header_chunks:
         chunk_tokens = _count_tokens(chunk.page_content, length_function)
-
-        if chunk_tokens <= budget and not TABLE_PATTERN.search(chunk.page_content):
+        IS_TABLE = TABLE_PATTERN.search(chunk.page_content)
+        if chunk_tokens <= budget and not IS_TABLE:
             # Small chunk, no table: pass through as-is
             all_chunks.append(chunk)
         else:
@@ -225,3 +229,26 @@ def chunk_document(
             all_chunks.extend(sub_chunks)
 
     return all_chunks
+if __name__ == "__main__":
+    import pickle
+    with open("/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/md/indexed-at-16-06-26/BBY_10K_2024.md", 'r', encoding='utf-8') as f:
+        doc = f.read()
+    import tiktoken
+    BUDGET = 400
+    enc = tiktoken.encoding_for_model("text-embedding-3-small")
+    length_function = lambda text: len(enc.encode(text))
+    char_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=BUDGET,
+        chunk_overlap=40,
+        separators=["\n\n", " ", "\u200b", "\uff0c", "\u3001", "\uff0e", "\u3002", ""],
+        length_function=length_function,
+        )
+    chunks = chunk_document(doc = doc, budget = BUDGET,header_splitter = sec_splitter_headers,char_splitter = char_splitter,length_function=length_function)
+    import pandas as pd
+    import uuid
+    chunks_df = pd.DataFrame([
+    {"id": str(uuid.uuid4()), "metadata": c.metadata, "text": c.page_content}
+    for c in chunks
+    ])
+    chunks_df.to_pickle('/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/chunks/indexed-at-16-06-26/headers_chars_split/BBY_10K_2024NEWNEWNEW.pkl')
+    
