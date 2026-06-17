@@ -5,6 +5,7 @@ from pathlib import Path
 import uuid
 import pandas as pd
 import pickle
+import tiktoken
 # PROJECT_ROOT = Path(__file__).resolve().parents[1]
 # if str(PROJECT_ROOT) not in sys.path:
 #     sys.path.insert(0, str(PROJECT_ROOT))
@@ -12,7 +13,8 @@ import pickle
 #from chunking.metadata_extractor import get_meta_sec, sec_metadata
 #from chunking.sec_processing import sec_to_mk, sec_splitter_headers, enrich_md_text, search_sec_bm25, sec_splitter_header_chars
 from metadata_extractor import get_meta_sec, sec_metadata
-from sec_processing import sec_to_mk, sec_splitter_headers, enrich_md_text, search_sec_bm25, sec_splitter_chars, inject_header_placeholders, collapse_double_newlines
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from sec_processing import sec_to_mk, sec_splitter_headers, enrich_md_text, inject_header_placeholders,chunk_document
 
 
 
@@ -57,7 +59,8 @@ def sec_chunking_pipeline(html_path, corpus_path, MD_PATH,
     elif method == "head_and_chars":
         print("Splitting into headers and chars chunks...")
         header_chunks = sec_splitter_headers(mk_file)
-        chunks = sec_splitter_chars(doc = header_chunks, chunk_size=400, chunk_overlap=40)
+        chunks = chunk_document(budget = BUDGET,header_chunks = header_chunks, char_splitter=CHAR_SPLITTER,length_function=LENGTH_FUNC)
+        
 
     # convert chunks from langchanin list of document objects into DataFrame
     chunks_df = pd.DataFrame([
@@ -78,41 +81,25 @@ def sec_chunking_pipeline(html_path, corpus_path, MD_PATH,
 #%%
 
 if __name__ == "__main__":
-    #RAW_FILES = os.listdir("/Users/nadavsmacbookair/Desktop/Thesis/data/html/indexed at 13-6-26")
-    #RAW_FILES = [f for f in RAW_FILES if f.endswith(".html")]
-    RAW_FILES = ["BBY_10K_2024_copy.html"]
+    RAW_FILES = os.listdir("/Users/nadavsmacbookair/Desktop/Thesis/data/html/indexed at 13-6-26")
+    RAW_FILES = [f for f in RAW_FILES if f.endswith(".html")]
+    path_names = [os.path.join("/Users/nadavsmacbookair/Desktop/Thesis/data/html/indexed at 13-6-26/",f) for f in RAW_FILES]
 
-    print(RAW_FILES)
-    #path_names = [os.path.join("/Users/nadavsmacbookair/Desktop/Thesis/data/html/indexed at 13-6-26",f)for f in RAW_FILES]
-    path_names = ["/Users/nadavsmacbookair/Desktop/Thesis/data/html/indexed at 13-6-26/BBY_10K_2024_copy.html"]
+    BUDGET = 400
+    LENGTH_FUNC = lambda text: len(enc.encode(text))
+    CHAR_SPLITTER = RecursiveCharacterTextSplitter(
+        chunk_size=BUDGET,
+        chunk_overlap=40,
+        separators=["\n\n", " ", "\u200b", "\uff0c", "\u3001", "\uff0e", "\u3002", ""],
+        length_function=LENGTH_FUNC,
+        )
+    enc = tiktoken.encoding_for_model("text-embedding-3-small")
+    #%%                          
     for (path,name) in zip(path_names,RAW_FILES):
         name = name[:-5]
-        
-
-        # CORPUS_PATH_header_split = f"/Users/nadavsmacbookair/Desktop/Thesis/Code_old/data/Corpus/{name}-Chunks-headers_split.pkl"
-        CORPUS_PATH_header_split = f"/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/chunks/indexed-at-16-06-26/headers_split/{name}.pkl"
-        CORPUS_PATH_header_char_split = f"/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/chunks/indexed-at-16-06-26/headers_chars_split/{name}.pkl"
+        #CORPUS_PATH_header_split = f"/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/chunks/indexed-at-16-06-26/headers_split/{name}.pkl"
+        CORPUS_PATH_header_char_split = f"/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/chunks/indexed-at-17-06-26/headers_chars_split/{name}.pkl"
         MD_PATH = f"/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/md/indexed-at-16-06-26/{name}.md"
-        corpus_header_split = sec_chunking_pipeline(path, CORPUS_PATH_header_split, MD_PATH, method = "head")
+        # corpus_header_split = sec_chunking_pipeline(path, CORPUS_PATH_header_split, MD_PATH, method = "head")
         corpus_header_char_split = sec_chunking_pipeline(path, CORPUS_PATH_header_char_split, MD_PATH, method="head_and_chars")
-
-
-
-#%%
-
-# import pickle
-# CORPUS_PATH = f"/Users/nadavsmacbookair/Desktop/Thesis/Code/data/Corpus/BESTBUY_2023_10K-Chunks.pkl"
-
-# if os.path.exists(CORPUS_PATH):
-#     with open (CORPUS_PATH, 'rb') as f:
-#         corpus = pickle.load(f)
-#         print(corpus)
-# # %%
-# corpus.iloc[140].metadata
-
-#%% look at NEM_10K_2023.pkl
-# import pickle
-# with open ("/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/chunks/indexed-at-16-06-26/headers_split/BBY_10K_2024_copy.pkl", 'rb') as f:
-#     corpus_headers = pickle.load(f)
-# with open ("/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/chunks/indexed-at-16-06-26/headers_chars_split/BBY_10K_2024_copy.pkl", 'rb') as f:
-#     corpus_headers_chars = pickle.load(f)
+    
