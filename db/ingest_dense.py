@@ -1,4 +1,7 @@
 #%%
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 import uuid
 import pickle
 import torch
@@ -7,7 +10,6 @@ from datetime import datetime
 from sentence_transformers import SentenceTransformer
 from qdrant_client import models
 from qdrant_client.models import PointStruct, VectorParams, Distance
-
 from models import doc_payload
 from db.database import get_qdrant_client
 from db.utils import get_batches

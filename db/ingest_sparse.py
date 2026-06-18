@@ -1,3 +1,6 @@
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 import uuid
 import pickle
 import pandas as pd
@@ -10,7 +13,6 @@ from db.database import get_qdrant_client
 from db.utils import get_batches
 
 client = get_qdrant_client()
-
 # Configuration
 COLLECTION_NAME = "--split headers --bm25 text"
 EMBED_META = False
