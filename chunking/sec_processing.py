@@ -237,18 +237,16 @@ def sec_splitter_headers(doc):
     return(header_chunks)
 
 # Matches a full markdown table: one or more pipe rows, then a separator row, then data rows
-grp = r'(?:\|.+\|\n)+\|[-| :]+\|\n(?:\|.+\|\n)'
+pipe_row = r'(?:\|.+\|\n)'
+separator_row = r'\|[-| :]+\|\n'
+data_rows = r'(?:\|.+\|\n|\n)*'   # pipe line OR bare newline (blank line)
+
+grp = rf'{pipe_row}+{separator_row}{data_rows}'
+
 TABLE_PATTERN = re.compile(
-    # ?P<table> says- name this group as table. 
-    rf'(?P<table>{grp}*)', 
+    rf'(?P<table>{grp})',
     re.MULTILINE
-    )
-grp = r'(?:\|.+\|\n)+\|[-| :]+\|\n(?:\|.+\|\n)'
-TABLE_PATTERN = re.compile(
-    # ?P<table> says- name this group as table. 
-    rf'(?P<table>{grp}*)', 
-    re.MULTILINE
-    )
+)
 
 
 def _count_tokens(text: str, length_function) -> int:

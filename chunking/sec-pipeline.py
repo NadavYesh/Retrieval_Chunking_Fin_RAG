@@ -90,7 +90,7 @@ if __name__ == "__main__":
     CHAR_SPLITTER = RecursiveCharacterTextSplitter(
         chunk_size=BUDGET,
         chunk_overlap=40,
-        separators=["\n\n", " ", "\u200b", "\uff0c", "\u3001", "\uff0e", "\u3002", ""],
+        separators=["\n\n","\n", " ", "\u200b", "\uff0c", "\u3001", "\uff0e", "\u3002", ""],
         length_function=LENGTH_FUNC,
         )
     enc = tiktoken.encoding_for_model("text-embedding-3-small")
