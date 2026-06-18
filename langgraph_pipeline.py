@@ -33,8 +33,8 @@ def query_analyzer_node(state: GraphState, config: RunnableConfig):
     and produces a high-density financial search prompt.
     """    
     configurable = config.get("configurable", {})
-    model = configurable.get("model")
-    tokenizer = configurable.get("tokenizer")
+    model = configurable.get("eval_model")
+    tokenizer = configurable.get("eval_model")
 
     print(f"\n--- NODE: query_analyzer_node ---")
     print(f"Goal: Extracting financial metadata and optimizing the prompt for vector search.")
@@ -181,6 +181,8 @@ def generator_node(state: GraphState, config: RunnableConfig):
     
     return {"answer": answer, "sources": chunk_sources}
 
+
+# =====================================================================
 def create_advanced_financial_rag_graph():
     """
     Builds the full state machine including grading, rewriting, and generation.
@@ -225,6 +227,7 @@ if __name__ == "__main__":
     
     print("Loading models...")
     model, tokenizer, *_ = load("mlx-community/Llama-3.2-3B-Instruct-4bit")
+    eval_model, eval_tokenizer, *_ = load("mlx-community/Qwen3.5-9B-MLX-4bit")
     embed_model = SentenceTransformer("google/embeddinggemma-300M", device="mps")
     #%%
     # 1. Fetch data from FinDER and take first 10 points
