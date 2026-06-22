@@ -67,8 +67,14 @@ def upsert_data():
     if confirm.lower() != 'y':
         print("Ingestion aborted.")
         return
+    word_embedding_model = models.Transformer("mlx-community/embeddinggemma-300m-bf16")
+    pooling_model = models.Pooling(
+        word_embedding_model.get_word_embedding_dimension(), # pass the output parameters.
+        pooling_mode_mean_tokens=True
+    )
 
-    model = SentenceTransformer("google/embeddinggemma-300M", device="mps")
+    model = SentenceTransformer(modules=[word_embedding_model, pooling_model])
+
     torch.set_num_threads(1)
     
     upsert_batch = 42

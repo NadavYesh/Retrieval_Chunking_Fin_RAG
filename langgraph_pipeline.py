@@ -34,7 +34,7 @@ def query_analyzer_node(state: GraphState, config: RunnableConfig):
     """    
     configurable = config.get("configurable", {})
     model = configurable.get("eval_model")
-    tokenizer = configurable.get("eval_model")
+    tokenizer = configurable.get("eval_tokenizer")
 
     print(f"\n--- NODE: query_analyzer_node ---")
     print(f"Goal: Extracting financial metadata and optimizing the prompt for vector search.")
@@ -223,12 +223,21 @@ def create_simple_financial_rag_graph():
 # --- Example Usage ---
 if __name__ == "__main__":
     from mlx_lm import load
-    from sentence_transformers import SentenceTransformer
+    from sentence_transformers import SentenceTransformer, models
     
     print("Loading models...")
     model, tokenizer, *_ = load("mlx-community/Llama-3.2-3B-Instruct-4bit")
-    eval_model, eval_tokenizer, *_ = load("mlx-community/Qwen3.5-9B-MLX-4bit")
-    embed_model = SentenceTransformer("google/embeddinggemma-300M", device="mps")
+    eval_model, eval_tokenizer, *__ = load("mlx-community/Qwen2.5-7B-Instruct-4bit")
+    
+    word_embedding_model = models.Transformer("mlx-community/embeddinggemma-300m-bf16")
+    pooling_model = models.Pooling(
+        word_embedding_model.get_word_embedding_dimension(), # pass the output parameters.
+        pooling_mode_mean_tokens=True
+    )
+
+    embed_model = SentenceTransformer(modules=[word_embedding_model, pooling_model])
+
+
     #%%
     # 1. Fetch data from FinDER and take first 10 points
     finder_df = run_finder()
@@ -247,6 +256,8 @@ if __name__ == "__main__":
     pipeline_config = {
         "model": model, 
         "tokenizer": tokenizer, 
+        "eval_model": eval_model,
+        "eval_tokenizer": eval_tokenizer,
         "embed_model": embed_model,
         "coll_name": "--embedding embeddinggemma-300M --chunking-split headers"
     }
