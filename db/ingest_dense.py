@@ -44,11 +44,14 @@ def init_collection():
     fields = ["form_type", "company_name", "ticker"]
     for field in fields:
         client.create_payload_index(COLL_NAME, field, models.PayloadSchemaType.KEYWORD)
-    
+
     client.create_payload_index(COLL_NAME, "fiscal_year_end", models.PayloadSchemaType.DATETIME)
-    
+
     for field in ["section", "subsection", "item"]:
         client.create_payload_index(COLL_NAME, field, models.PayloadSchemaType.TEXT)
+
+    for field in ["doc_id", "parent_id"]:
+        client.create_payload_index(COLL_NAME, field, models.PayloadSchemaType.KEYWORD)
 
     client.create_payload_index(
         collection_name=COLL_NAME,
