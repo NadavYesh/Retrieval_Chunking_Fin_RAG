@@ -11,13 +11,7 @@ def filter_FinDER(df, strings_to_filter):
 
 
 
-def run_finder():
-    companies = ["pypl","paypal","bestbuy","bby","google"
-                                ,"googl","amazon","amzn","JPMorgan","jpm","tesla","tsla",
-                                "meta","facebook","fb","newmont","nem","agnico","aem","boeing","ba",
-                                "intc","intel","nvda","nvidia","aapl","apple","tsmc",
-                                "taiwan semiconductor","wmt","walmart","xom","exxon",
-                                "ko","cocacola","coca-cola","cola","chevron","cvx","welltower",
-                                "iff","international flavors and fragrances"]
+def run_finder(companies):
+    # companies = ["pypl","paypal"]
     df = pd.read_parquet("/Users/nadavsmacbookair/Desktop/Thesis/data/FinDER/train.parquet")
     return (filter_FinDER(df, companies))

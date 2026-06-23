@@ -1,5 +1,6 @@
 #%%
 import json
+import random
 import re
 from datetime import datetime
 from pathlib import Path
@@ -295,6 +296,185 @@ def run_evaluation(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Pairwise LLM-judge evaluation
+# ─────────────────────────────────────────────────────────────────────────────
+JUDGE_PROMPT = """\
+[System]
+Please act as an impartial judge and evaluate the quality of the responses provided by two \
+AI assistants to the user question displayed below. Your evaluation should consider \
+correctness and helpfulness. You will be given a reference answer, assistant A's answer, \
+and assistant B's answer. Your job is to evaluate which assistant's answer is better. \
+Begin your evaluation by comparing both assistants' answers with the reference answer. \
+Identify and correct any mistakes. Avoid any position biases and ensure that the order in \
+which the responses were presented does not influence your decision. Do not allow the \
+length of the responses to influence your evaluation. Do not favor certain names of the \
+assistants. Be as objective as possible. After providing your explanation, output your \
+final verdict by strictly following this format: "[[A]]" if assistant A is better, "[[B]]" \
+if assistant B is better, and "[[C]]" for a tie.
+[User Question]
+{question}
+[The Start of Reference Answer]
+{answer_ref}
+[The End of Reference Answer]
+[The Start of Assistant A's Answer]
+{answer_a}
+[The End of Assistant A's Answer]
+[The Start of Assistant B's Answer]
+{answer_b}
+[The End of Assistant B's Answer]\
+"""
+
+
+def _parse_verdict(text: str) -> str:
+    """Extract A, B, or C from [[X]] pattern. Returns '?' if unparseable."""
+    m = re.search(r'\[\[([ABC])\]\]', text, re.IGNORECASE)
+    return m.group(1).upper() if m else "?"
+
+
+def judge_pair(
+    question:   str,
+    answer_ref: str,
+    answer_a:   str,
+    answer_b:   str,
+    model,
+    tokenizer,
+    max_tokens: int = 512,
+) -> tuple[str, str]:
+    """
+    Ask the judge LLM to compare answer_a vs answer_b given answer_ref.
+    Returns (verdict, raw_response) where verdict is 'A', 'B', 'C', or '?'.
+    """
+    content  = JUDGE_PROMPT.format(
+        question=question, answer_ref=answer_ref,
+        answer_a=answer_a, answer_b=answer_b,
+    )
+    prompt   = tokenizer.apply_chat_template(
+        [{"role": "user", "content": content}],
+        tokenize=False, add_generation_prompt=True,
+    )
+    raw = generate(model, tokenizer, prompt=prompt, max_tokens=max_tokens, verbose=False)
+    return _parse_verdict(raw), raw
+
+
+def run_pairwise_eval(
+    results_df:      pd.DataFrame,
+    finder_df:       pd.DataFrame,
+    judge_model,
+    judge_tokenizer,
+    baseline_level:  str = "doc",
+    ref_col:         str = "answer",
+    output_dir:      str = "/Users/nadavsmacbookair/Desktop/Thesis/data/eval_results",
+    seed:            int = 42,
+) -> pd.DataFrame:
+    """
+    LLM-judge pairwise comparison: baseline_level vs every other level in results_df.
+
+    For each (question, comparison_level) pair the A/B order is randomized to
+    mitigate position bias; the verdict is mapped back to the actual winning level.
+
+    Args:
+        results_df:     Output of run_evaluation() — one row per (question × level).
+        finder_df:      FinDER DataFrame; must contain 'text' and ref_col columns.
+        baseline_level: Level treated as the reference system (default "doc").
+        ref_col:        Column in finder_df with gold reference answers.
+
+    Returns:
+        DataFrame with one row per (question × comparison_level).
+        Also saves a win-rate summary and the full comparison table to output_dir.
+    """
+    random.seed(seed)
+
+    if ref_col not in finder_df.columns:
+        raise ValueError(
+            f"Column '{ref_col}' not found in finder_df. Available: {list(finder_df.columns)}"
+        )
+
+    ref_lookup        = dict(zip(finder_df["text"], finder_df[ref_col]))
+    comparison_levels = [l for l in results_df["level"].unique() if l != baseline_level]
+
+    if not comparison_levels:
+        raise ValueError(f"No levels to compare against baseline '{baseline_level}'.")
+
+    rows      = []
+    questions = results_df["raw_query"].unique()
+
+    for q_idx, raw_query in enumerate(questions):
+        q_rows     = results_df[results_df["raw_query"] == raw_query]
+        ref_answer = ref_lookup.get(raw_query, "")
+
+        baseline_row = q_rows[q_rows["level"] == baseline_level]
+        if baseline_row.empty:
+            continue
+        baseline_answer = baseline_row.iloc[0]["answer"]
+
+        print(f"\n[Judge Q {q_idx+1}/{len(questions)}] {raw_query[:70]}...")
+
+        for comp_level in comparison_levels:
+            comp_row = q_rows[q_rows["level"] == comp_level]
+            if comp_row.empty:
+                continue
+            comp_answer = comp_row.iloc[0]["answer"]
+
+            # Randomize A/B order to reduce position bias
+            swapped = random.random() < 0.5
+            if swapped:
+                answer_a, answer_b = comp_answer,     baseline_answer
+                level_a,  level_b  = comp_level,      baseline_level
+            else:
+                answer_a, answer_b = baseline_answer, comp_answer
+                level_a,  level_b  = baseline_level,  comp_level
+
+            print(f"  {baseline_level} vs {comp_level}  (A={level_a})", end="  ")
+            verdict, raw_response = judge_pair(
+                raw_query, ref_answer, answer_a, answer_b,
+                judge_model, judge_tokenizer,
+            )
+            print(f"→ [[{verdict}]]")
+
+            winner = level_a if verdict == "A" else (level_b if verdict == "B" else "tie")
+
+            rows.append({
+                "raw_query":       raw_query,
+                "ticker":          baseline_row.iloc[0].get("ticker"),
+                "year":            baseline_row.iloc[0].get("year"),
+                "baseline_level":  baseline_level,
+                "comp_level":      comp_level,
+                "level_a":         level_a,
+                "level_b":         level_b,
+                "answer_a":        answer_a,
+                "answer_b":        answer_b,
+                "ref_answer":      ref_answer,
+                "swapped":         swapped,
+                "verdict":         verdict,
+                "winner":          winner,
+                "judge_reasoning": raw_response,
+            })
+
+    pairwise_df = pd.DataFrame(rows)
+
+    # ── Win-rate summary ──────────────────────────────────────────────────────
+    if not pairwise_df.empty:
+        n = pairwise_df.groupby("comp_level")["winner"].count().rename("n_questions")
+        win_rates = (
+            pairwise_df.groupby(["comp_level", "winner"])
+            .size()
+            .unstack(fill_value=0)
+            .div(n, axis=0)
+            .round(3)
+        )
+        print("\n── Win-rate summary (rows = comparison level) ──")
+        print(win_rates.to_string())
+
+    # ── Save ──────────────────────────────────────────────────────────────────
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M")
+    pairwise_df.to_csv(f"{output_dir}/pairwise_{ts}.csv",    index=False)
+    pairwise_df.to_pickle(f"{output_dir}/pairwise_{ts}.pkl")
+    print(f"\nSaved → {output_dir}/pairwise_{ts}.{{csv,pkl}}")
+    return pairwise_df
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 #%%
 if __name__ == "__main__":
     from mlx_lm import load
@@ -306,6 +486,9 @@ if __name__ == "__main__":
     print("Loading embedding model...")
     embed_model = MLXEmbedder("mlx-community/embeddinggemma-300m-bf16")
 
+    finder_df = run_finder()
+
+    # ── Stage 1: generate answers for all levels ──────────────────────────────
     results = run_evaluation(
         gen_model=gen_model,
         gen_tokenizer=gen_tokenizer,
@@ -313,6 +496,13 @@ if __name__ == "__main__":
         levels=["doc", "header", "child", "enriched"],
     )
 
+    # ── Stage 2: pairwise judge comparison ───────────────────────────────────
     if not results.empty:
-        print(f"\nDone. {len(results)} total runs.")
-        print(results[["level", "ticker", "year", "answer"]].head(20).to_string())
+        print(f"\nDone generating. {len(results)} total runs.")
+        pairwise = run_pairwise_eval(
+            results_df=results,
+            finder_df=finder_df,
+            judge_model=gen_model,        # reuse; swap for a stronger judge if available
+            judge_tokenizer=gen_tokenizer,
+            baseline_level="doc",
+        )
