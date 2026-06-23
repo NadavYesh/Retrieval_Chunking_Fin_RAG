@@ -1,31 +1,31 @@
 #%%
+import sys
+from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 import uuid
 import pickle
-import torch
 import pandas as pd
 from datetime import datetime
-from sentence_transformers import SentenceTransformer
-from qdrant_client import models
+from qdrant_client import models as qdrant_models
 from qdrant_client.models import PointStruct, VectorParams, Distance
-from models import doc_payload
+from models import doc_payload, MLXEmbedder
 from db.database import get_qdrant_client
 from db.utils import get_batches
 
 client = get_qdrant_client()
 ######################
-# AMZN_10K_2024 failed on batch 3. remove all its ids and do again
 
 ######################
 # Configuration
-COLL_NAME = "--embedding embeddinggemma-300M --chunking-split headers"
+COLL_NAME = "--level 2"
 EMBED_META = False
 import os
-files = os.listdir("/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/chunks/indexed-at-13-06-26/headers_split")
+path_ = "/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/chunks/hierarchical/child"
+files = os.listdir(path_)
 files = [f for f in files if f.endswith(".pkl")]
-paths=[os.path.join("/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/chunks/indexed-at-13-06-26/headers_split",f)for f in files]
+paths=[os.path.join(path_,f)for f in files]
 
 #%%
 CHUNK_PATHS = paths
@@ -40,25 +40,26 @@ def init_collection():
     except Exception:
         print(f"Collection {COLL_NAME} already exists.")
 
-    # Create indices
+    # Create indices by type. not everything must have a value
     fields = ["form_type", "company_name", "ticker"]
     for field in fields:
-        client.create_payload_index(COLL_NAME, field, models.PayloadSchemaType.KEYWORD)
+        client.create_payload_index(COLL_NAME, field, qdrant_models.PayloadSchemaType.KEYWORD)
 
-    client.create_payload_index(COLL_NAME, "fiscal_year_end", models.PayloadSchemaType.DATETIME)
+    client.create_payload_index(COLL_NAME, "fiscal_year_end", qdrant_models.PayloadSchemaType.DATETIME)
 
     for field in ["section", "subsection", "item"]:
-        client.create_payload_index(COLL_NAME, field, models.PayloadSchemaType.TEXT)
+        client.create_payload_index(COLL_NAME, field, qdrant_models.PayloadSchemaType.TEXT)
 
     for field in ["doc_id", "parent_id"]:
-        client.create_payload_index(COLL_NAME, field, models.PayloadSchemaType.KEYWORD)
+        client.create_payload_index(COLL_NAME, field, qdrant_models.PayloadSchemaType.KEYWORD)
 
+    # this will allow bm25
     client.create_payload_index(
         collection_name=COLL_NAME,
         field_name="text",
-        field_schema=models.TextIndexParams(
-            type=models.TextIndexType.TEXT,
-            tokenizer=models.TokenizerType.WORD,
+        field_schema=qdrant_models.TextIndexParams(
+            type=qdrant_models.TextIndexType.TEXT,
+            tokenizer=qdrant_models.TokenizerType.WORD,
             lowercase=True,
             phrase_matching=True,
         ),
@@ -70,16 +71,8 @@ def upsert_data():
     if confirm.lower() != 'y':
         print("Ingestion aborted.")
         return
-    word_embedding_model = models.Transformer("mlx-community/embeddinggemma-300m-bf16")
-    pooling_model = models.Pooling(
-        word_embedding_model.get_word_embedding_dimension(), # pass the output parameters.
-        pooling_mode_mean_tokens=True
-    )
+    model = MLXEmbedder("mlx-community/embeddinggemma-300m-bf16")
 
-    model = SentenceTransformer(modules=[word_embedding_model, pooling_model])
-
-    torch.set_num_threads(1)
-    
     upsert_batch = 42
     encode_batch = 6
 
@@ -120,11 +113,12 @@ def upsert_data():
             print(f"  Encoding batch {batch_idx + 1}...")
             
 
-            with torch.no_grad():
-                embeddings = model.encode(batch_texts, 
-                                          # for search, use Retrieval-query
-                                          prompt_name="Retrieval-document",
-                                          show_progress_bar=False, batch_size=encode_batch).tolist()
+            embeddings = model.encode(
+                batch_texts,
+                prompt_name="document",
+                show_progress_bar=False,
+                batch_size=encode_batch,
+            ).tolist()
             
             points = []
             for idx, (metadata, text, p_id, raw_txt) in enumerate(zip(batch_metadatas, batch_texts, batch_ids, batch_raw)):
@@ -148,8 +142,6 @@ def upsert_data():
                 client.upsert(collection_name=COLL_NAME, wait=True, points=points)
             except ValueError as e:
                 print(pt.id for pt in points)
-            if torch.backends.mps.is_available():
-                torch.mps.empty_cache()
         
 def remove_points_from_pkl(pkl_path, collection_name=COLL_NAME):
     """
@@ -162,7 +154,7 @@ def remove_points_from_pkl(pkl_path, collection_name=COLL_NAME):
     ids_to_remove = chunk["id"].tolist() if hasattr(chunk["id"], "tolist") else list(chunk["id"])
     
     try:
-        client.delete(collection_name=collection_name, points_selector=models.PointIdsList(points=ids_to_remove))
+        client.delete(collection_name=collection_name, points_selector=qdrant_models.PointIdsList(points=ids_to_remove))
         print(f"Successfully deleted {len(ids_to_remove)} points.")
     except Exception as e:
         print(f"Error during deletion: {e}")

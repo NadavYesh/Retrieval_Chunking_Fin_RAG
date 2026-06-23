@@ -223,19 +223,13 @@ def create_simple_financial_rag_graph():
 # --- Example Usage ---
 if __name__ == "__main__":
     from mlx_lm import load
-    from sentence_transformers import SentenceTransformer, models
-    
+    from models import MLXEmbedder
+
     print("Loading models...")
     model, tokenizer, *_ = load("mlx-community/Llama-3.2-3B-Instruct-4bit")
     eval_model, eval_tokenizer, *__ = load("mlx-community/Qwen2.5-7B-Instruct-4bit")
-    
-    word_embedding_model = models.Transformer("mlx-community/embeddinggemma-300m-bf16")
-    pooling_model = models.Pooling(
-        word_embedding_model.get_word_embedding_dimension(), # pass the output parameters.
-        pooling_mode_mean_tokens=True
-    )
 
-    embed_model = SentenceTransformer(modules=[word_embedding_model, pooling_model])
+    embed_model = MLXEmbedder("mlx-community/embeddinggemma-300m-bf16")
 
 
     #%%

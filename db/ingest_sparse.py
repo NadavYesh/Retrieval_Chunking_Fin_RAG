@@ -37,6 +37,14 @@ def init_collection():
     except Exception:
         print(f"Collection {COLLECTION_NAME} already exists.")
 
+    for field in ["form_type", "company_name", "ticker", "doc_id", "parent_id"]:
+        client.create_payload_index(COLLECTION_NAME, field, models.PayloadSchemaType.KEYWORD)
+
+    client.create_payload_index(COLLECTION_NAME, "fiscal_year_end", models.PayloadSchemaType.DATETIME)
+
+    for field in ["section", "subsection", "item"]:
+        client.create_payload_index(COLLECTION_NAME, field, models.PayloadSchemaType.TEXT)
+
 def upsert_sparse_data():
     batch_size = 32
     print("Starting sparse upserting loop...")

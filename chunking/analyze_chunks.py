@@ -61,3 +61,6 @@ if __name__ == "__main__":
 
 
 #%%
+import pickle
+with open("/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/chunks/hierarchical/doc/NVDA_10K_2024.pkl", "rb") as f:
+    df = pickle.load(f)

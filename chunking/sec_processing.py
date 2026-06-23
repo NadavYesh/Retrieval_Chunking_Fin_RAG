@@ -442,24 +442,30 @@ def chunk_document(
 ) -> list[Document]:
     """
     Full pipeline: header split → table-aware char split.
+
+    If a header chunk has metadata["_id"] set (by the hierarchical pipeline),
+    that value is propagated as metadata["parent_id"] on every child chunk.
     """
     all_chunks: list[Document] = []
-    
+
     for chunk in header_chunks:
+        parent_id = chunk.metadata.get("_id")
         chunk_tokens = _count_tokens(chunk.page_content, length_function)
         IS_TABLE = TABLE_PATTERN.search(chunk.page_content)
         if chunk_tokens <= budget and not IS_TABLE:
-            # Small chunk, no table: pass through as-is
-            all_chunks.append(chunk)
+            sub_chunks = [chunk]
         else:
-            # May contain a table or is too large: go through table-aware splitter
             sub_chunks = split_chunk_with_table_awareness(
                 doc=chunk,
                 budget=budget,
                 length_function=length_function,
                 char_splitter=char_splitter,
             )
-            all_chunks.extend(sub_chunks)
+
+        if parent_id:
+            for sc in sub_chunks:
+                sc.metadata["parent_id"] = parent_id
+        all_chunks.extend(sub_chunks)
 
     return all_chunks
 

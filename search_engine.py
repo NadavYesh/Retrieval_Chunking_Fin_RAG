@@ -7,7 +7,6 @@ import re
 import time
 from datetime import datetime
 from mlx_lm import load, generate
-from sentence_transformers import SentenceTransformer
 from db.database import get_qdrant_client
 
 client = get_qdrant_client()
