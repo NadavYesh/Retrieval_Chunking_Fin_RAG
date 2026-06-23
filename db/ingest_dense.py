@@ -19,10 +19,10 @@ client = get_qdrant_client()
 
 ######################
 # Configuration
-COLL_NAME = "--level 2"
+COLL_NAME = "--level 3"
 EMBED_META = False
 import os
-path_ = "/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/chunks/hierarchical/child"
+path_ = "/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/chunks/hierarchical/enriched"
 files = os.listdir(path_)
 files = [f for f in files if f.endswith(".pkl")]
 paths=[os.path.join(path_,f)for f in files]
@@ -64,6 +64,17 @@ def init_collection():
             phrase_matching=True,
         ),
     )
+    # only for enriched
+    client.create_payload_index(
+        collection_name=COLL_NAME,
+        field_name="description",
+        field_schema=qdrant_models.TextIndexParams(
+            type=qdrant_models.TextIndexType.TEXT,
+            tokenizer=qdrant_models.TokenizerType.WORD,
+            lowercase=True,
+            phrase_matching=True,
+        ),
+    )
 
 def upsert_data():
     print(f"WARNING: are you absolutuley sure you want to ingest data? Make sure you are not replicating.\nthis is collection {COLL_NAME}")
@@ -83,7 +94,8 @@ def upsert_data():
         with open(path, "rb") as f:
             chunk = pickle.load(f)
         
-        texts = chunk['text'].tolist() if hasattr(chunk['text'], 'tolist') else chunk['text']
+        # texts = chunk['text'].tolist() if hasattr(chunk['text'], 'tolist') else chunk['text']
+        texts = (chunk['description'] + chunk['text']).tolist()
         metadatas = chunk['metadata'].tolist() if hasattr(chunk['metadata'], 'tolist') else chunk['metadata']
         ids = chunk['id'].tolist() if 'id' in chunk.columns else [str(uuid.uuid4()) for _ in range(len(texts))]
         raw_texts = chunk['text'].tolist() if hasattr(chunk['text'], 'tolist') else chunk['text']

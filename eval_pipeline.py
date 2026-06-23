@@ -6,7 +6,6 @@ from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TypedDict, List, Optional
-
 import pandas as pd
 from langgraph.graph import StateGraph, END
 from langchain_core.runnables import RunnableConfig
@@ -27,6 +26,7 @@ COLLECTIONS = {
     "child":    {"coll_name": "--level 2", "use_parent_fetch": True},
     "enriched": {"coll_name": "--level 3", "use_parent_fetch": True},
 }
+# this is the chunk given to generator. 
 PARENT_COLL = "--level 1"   # parent_fetch always pulls header chunks
 
 
@@ -35,7 +35,6 @@ PARENT_COLL = "--level 1"   # parent_fetch always pulls header chunks
 # ─────────────────────────────────────────────────────────────────────────────
 class EvalState(TypedDict):
     raw_query:        str
-    optimized_query:  str
     ticker:           Optional[str]
     year:             Optional[int]
     form_type:        Optional[str]
@@ -44,6 +43,7 @@ class EvalState(TypedDict):
     retrieved_points: Optional[List]   # ScoredPoint from vector search
     context_points:   Optional[List]   # what reaches the generator (may be parent chunks)
     answer:           Optional[str]
+    ref_answer:       Optional[str]
     run_id:           str
     error:            Optional[str]
 
@@ -66,16 +66,19 @@ def extract_metadata(raw_query: str, model, tokenizer) -> dict:
     try:
         match = re.search(r'\{.*\}', response, re.DOTALL)
         if not match:
-            return {"optimized_query": raw_query, "ticker": None, "year": None, "form_type": None}
+            print("  [extract_metadata] WARNING: no JSON found in LLM response; using raw query")
+            return {"raw_query": raw_query, "ticker": None, "year": None, "form_type": None}
         data = json.loads(match.group())
-        return {
-            "optimized_query": data.pop("optimized_prompt", raw_query),
+        result = {
+            "raw_query": data.pop("raw_prompt", raw_query),
             "ticker":    data.get("ticker"),
             "year":      data.get("year"),
             "form_type": data.get("form_type"),
         }
-    except Exception:
-        return {"optimized_query": raw_query, "ticker": None, "year": None, "form_type": None}
+        return result
+    except Exception as e:
+        print(f"  [extract_metadata] WARNING: parse error ({e}); using raw query")
+        return {"raw_query": raw_query, "ticker": None, "year": None, "form_type": None}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -87,16 +90,21 @@ def retrieve_node(state: EvalState, config: RunnableConfig) -> dict:
     embed_model = cfg["embed_model"]
     coll_name   = cfg["coll_name"]
 
-    print(f"  [retrieve] level={state['level']} | ticker={state.get('ticker')} year={state.get('year')}")
-
     filters = {k: state[k] for k in ("ticker", "year", "form_type") if state.get(k)}
+    print(f"  [retrieve:{state['level']}] collection='{coll_name}' filters={filters}")
 
     try:
-        query_vec = embed_model.encode(state["optimized_query"], prompt_name="query").tolist()
+        query_vec = embed_model.encode(state["raw_query"], prompt_name="query").tolist()
         results   = search_with_payload(coll_name, query_vec, payload_must=filters)
         points    = results.points if hasattr(results, "points") else []
+        scores    = [round(p.score, 3) for p in points] if points else []
+        print(f"  [retrieve:{state['level']}] {len(points)} hits | scores={scores}")
     except Exception as e:
+        print(f"  [retrieve:{state['level']}] ERROR: {e}")
         return {"error": str(e), "retrieved_points": [], "context_points": []}
+
+    if not points:
+        print(f"  [retrieve:{state['level']}] WARNING: 0 results — check filters or collection name")
 
     return {"retrieved_points": points, "context_points": points, "error": None}
 
@@ -116,14 +124,16 @@ def parent_fetch_node(state: EvalState, config: RunnableConfig) -> dict:
     })
 
     if not parent_ids:
-        return {}   # keep context_points unchanged
+        print(f"  [parent_fetch:{state['level']}] WARNING: no parent_id found in retrieved chunks; passing child chunks to generator")
+        return {}
 
     try:
         parent_records = client.retrieve(parent_coll, ids=parent_ids, with_payload=True)
-        print(f"  [parent_fetch] {len(parent_ids)} child → {len(parent_records)} header chunks")
+        ctx_tokens_est = sum(len(r.payload.get("text", "").split()) for r in parent_records)
+        print(f"  [parent_fetch:{state['level']}] {len(parent_ids)} child → {len(parent_records)} header chunks (~{ctx_tokens_est} words passed to generator)")
         return {"context_points": parent_records}
     except Exception as e:
-        print(f"  [parent_fetch] failed ({e}); using child chunks as context")
+        print(f"  [parent_fetch:{state['level']}] ERROR: {e}; falling back to child chunks")
         return {}
 
 
@@ -133,13 +143,16 @@ def generate_node(state: EvalState, config: RunnableConfig) -> dict:
     model     = cfg["gen_model"]
     tokenizer = cfg["gen_tokenizer"]
 
-    if not state.get("context_points"):
+    n_ctx = len(state.get("context_points") or [])
+    print(f"  [generate:{state['level']}] {n_ctx} context chunk(s) → LLM")
+
+    if not n_ctx:
+        print(f"  [generate:{state['level']}] WARNING: empty context; returning fallback answer")
         return {"answer": "No relevant context retrieved."}
 
-    # generate_llm_answer expects an object with .points; SimpleNamespace bridges
-    # ScoredPoint (from retrieve) and Record (from parent_fetch) transparently
     wrapped   = SimpleNamespace(points=state["context_points"])
     answer, _ = generate_llm_answer(state["raw_query"], wrapped, model, tokenizer)
+    print(f"  [generate:{state['level']}] answer ({len(answer)} chars): {answer[:120].strip()}{'...' if len(answer) > 120 else ''}")
     return {"answer": answer}
 
 
@@ -148,7 +161,7 @@ def collect_node(state: EvalState, config: RunnableConfig) -> dict:
     config["configurable"]["results_list"].append({
         "run_id":          state["run_id"],
         "raw_query":       state["raw_query"],
-        "optimized_query": state["optimized_query"],
+        "ref_answer":      state.get("ref_answer", ""),
         "ticker":          state.get("ticker"),
         "year":            state.get("year"),
         "level":           state["level"],
@@ -205,6 +218,7 @@ def run_evaluation(
     gen_model,
     gen_tokenizer,
     embed_model,
+    finder_df,
     output_dir: str = "/Users/nadavsmacbookair/Desktop/Thesis/data/eval_results",
     top_k: int = 5,
     levels: list = None,
@@ -223,11 +237,13 @@ def run_evaluation(
         levels = list(COLLECTIONS.keys())
 
     print("Loading FinDER questions...")
-    finder_df = run_finder()
+    
     if finder_df.empty:
         print("No FinDER questions found.")
         return pd.DataFrame()
-    print(f"{len(finder_df)} questions after company filter.")
+    print(f"FinDER: {len(finder_df)} questions after company filter.")
+    print(f"Levels to evaluate: {levels}")
+    print(f"Total graph runs: {len(finder_df) * len(levels)}")
 
     results_list = []
     graph        = create_eval_graph()
@@ -247,16 +263,16 @@ def run_evaluation(
 
         # Extract once — same ticker/year/prompt used for every level
         meta = extract_metadata(raw_query, gen_model, gen_tokenizer)
-        print(f"  ticker={meta['ticker']} year={meta['year']}")
+        print(f"  extracted → ticker={meta['ticker']} year={meta['year']} form_type={meta['form_type']}")
+        print(f"  optimized → {meta['raw_query'][:100]}{'...' if len(meta['raw_query']) > 100 else ''}")
 
         for level in levels:
             level_cfg = COLLECTIONS[level]
             run_id    = f"{meta.get('ticker','?')}_{meta.get('year','?')}_{level}_{q_idx}"
-            print(f"  → {level}")
+            print(f"\n  ── level: {level} (run {q_idx * len(levels) + levels.index(level) + 1}/{len(finder_df) * len(levels)}) ──")
 
             initial_state: EvalState = {
-                "raw_query":        raw_query,
-                "optimized_query":  meta["optimized_query"],
+                "raw_query":        meta["raw_query"],
                 "ticker":           meta.get("ticker"),
                 "year":             meta.get("year"),
                 "form_type":        meta.get("form_type"),
@@ -266,6 +282,7 @@ def run_evaluation(
                 "retrieved_points": None,
                 "context_points":   None,
                 "answer":           None,
+                "ref_answer":       str(row.get("answer", "")) if hasattr(row, "get") else str(row["answer"]) if "answer" in row.index else "",
                 "error":            None,
             }
             thread_cfg = {"configurable": {
@@ -279,7 +296,7 @@ def run_evaluation(
                 print(f"  [ERROR] {level}: {e}")
                 results_list.append({
                     "run_id": run_id, "raw_query": raw_query,
-                    "optimized_query": meta["optimized_query"],
+                    "raw_query": meta["raw_query"],
                     "ticker": meta.get("ticker"), "year": meta.get("year"),
                     "level": level, "answer": "", "error": str(e),
                     "retrieved_ids": [], "context_ids": [], "context_text": "",
@@ -289,9 +306,19 @@ def run_evaluation(
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     ts         = datetime.now().strftime("%Y%m%d_%H%M")
     results_df = pd.DataFrame(results_list)
+
+    n_ok    = results_df["error"].isna().sum()
+    n_err   = results_df["error"].notna().sum()
+    n_empty = (results_df["answer"] == "No relevant context retrieved.").sum()
+    print(f"\n── Evaluation complete ──────────────────────────────")
+    print(f"  Total runs : {len(results_df)}")
+    print(f"  Successful : {n_ok}")
+    print(f"  Empty ctx  : {n_empty}")
+    print(f"  Errors     : {n_err}")
+
     results_df.to_csv(f"{output_dir}/eval_{ts}.csv",  index=False)
     results_df.to_pickle(f"{output_dir}/eval_{ts}.pkl")
-    print(f"\nSaved → {output_dir}/eval_{ts}.{{csv,pkl}}")
+    print(f"  Saved      → {output_dir}/eval_{ts}.{{csv,pkl}}")
     return results_df
 
 
@@ -395,6 +422,15 @@ def run_pairwise_eval(
     if not comparison_levels:
         raise ValueError(f"No levels to compare against baseline '{baseline_level}'.")
 
+    n_questions    = len(results_df["raw_query"].unique())
+    n_comparisons  = n_questions * len(comparison_levels)
+    print(f"\n── Pairwise judge evaluation ────────────────────────")
+    print(f"  Baseline      : {baseline_level}")
+    print(f"  Comparing vs  : {comparison_levels}")
+    print(f"  Questions     : {n_questions}")
+    print(f"  Total pairs   : {n_comparisons}")
+    print(f"  Position swap : randomized (seed={seed})")
+
     rows      = []
     questions = results_df["raw_query"].unique()
 
@@ -404,10 +440,14 @@ def run_pairwise_eval(
 
         baseline_row = q_rows[q_rows["level"] == baseline_level]
         if baseline_row.empty:
+            print(f"  [Judge Q {q_idx+1}] SKIP: no baseline answer found")
             continue
         baseline_answer = baseline_row.iloc[0]["answer"]
 
-        print(f"\n[Judge Q {q_idx+1}/{len(questions)}] {raw_query[:70]}...")
+        has_ref = bool(ref_answer.strip())
+        print(f"\n[Judge Q {q_idx+1}/{n_questions}] {raw_query[:70]}...")
+        if not has_ref:
+            print(f"  WARNING: no reference answer found for this question")
 
         for comp_level in comparison_levels:
             comp_row = q_rows[q_rows["level"] == comp_level]
@@ -424,12 +464,14 @@ def run_pairwise_eval(
                 answer_a, answer_b = baseline_answer, comp_answer
                 level_a,  level_b  = baseline_level,  comp_level
 
-            print(f"  {baseline_level} vs {comp_level}  (A={level_a})", end="  ")
+            pair_num = q_idx * len(comparison_levels) + comparison_levels.index(comp_level) + 1
+            print(f"  [{pair_num}/{n_comparisons}] {baseline_level} vs {comp_level}  A={level_a}  swapped={swapped}", end="  ")
             verdict, raw_response = judge_pair(
                 raw_query, ref_answer, answer_a, answer_b,
                 judge_model, judge_tokenizer,
             )
-            print(f"→ [[{verdict}]]")
+            winner_display = level_a if verdict == "A" else (level_b if verdict == "B" else "tie")
+            print(f"→ [[{verdict}]] winner={winner_display}")
 
             winner = level_a if verdict == "A" else (level_b if verdict == "B" else "tie")
 
@@ -468,6 +510,7 @@ def run_pairwise_eval(
     # ── Save ──────────────────────────────────────────────────────────────────
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M")
+    print("Saving...")
     pairwise_df.to_csv(f"{output_dir}/pairwise_{ts}.csv",    index=False)
     pairwise_df.to_pickle(f"{output_dir}/pairwise_{ts}.pkl")
     print(f"\nSaved → {output_dir}/pairwise_{ts}.{{csv,pkl}}")
@@ -479,21 +522,22 @@ def run_pairwise_eval(
 if __name__ == "__main__":
     from mlx_lm import load
     from models import MLXEmbedder
-
+    tickers = ["nvda"]
+    finder_df = run_finder(tickers=tickers).head(2)
     print("Loading generation model...")
     gen_model, gen_tokenizer = load("mlx-community/Llama-3.2-3B-Instruct-4bit")
 
     print("Loading embedding model...")
     embed_model = MLXEmbedder("mlx-community/embeddinggemma-300m-bf16")
 
-    finder_df = run_finder()
-
     # ── Stage 1: generate answers for all levels ──────────────────────────────
     results = run_evaluation(
         gen_model=gen_model,
         gen_tokenizer=gen_tokenizer,
         embed_model=embed_model,
-        levels=["doc", "header", "child", "enriched"],
+        finder_df=finder_df, #temp
+        levels=[#"doc", 
+                "header", "child", "enriched"],
     )
 
     # ── Stage 2: pairwise judge comparison ───────────────────────────────────

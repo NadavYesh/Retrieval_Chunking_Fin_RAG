@@ -2,18 +2,20 @@ import pydantic
 from typing import Optional
 from datetime import datetime
 import numpy as np
-import mlx.core as mx
-from mlx_lm import load as _mlx_load
+from sentence_transformers import SentenceTransformer
+from sentence_transformers import models as st_models
 
 
 class MLXEmbedder:
     """
-    Drop-in replacement for SentenceTransformer that runs fully on MLX.
-    Loads any mlx-lm compatible model and produces fixed-size embeddings via
-    mean pooling over the transformer body's last hidden states.
+    Thin wrapper around SentenceTransformer for Gemma-style embedding models.
+
+    Handles instruction-prefix injection (document / query) so call sites can
+    use prompt_name="document" or prompt_name="query" identically to before.
+    mlx_lm.load is NOT used here — embedding models have SentenceTransformer
+    pooling layers (dense.*.weight) that mlx_lm rejects as unknown parameters.
     """
 
-    # Gemma embedding instruction prefixes (empty string = no prefix)
     _PREFIXES: dict = {
         "document":        "Represent this document for retrieval: ",
         "passage":         "Represent this document for retrieval: ",
@@ -22,32 +24,31 @@ class MLXEmbedder:
     }
 
     def __init__(self, model_path: str):
-        self._model, self.tokenizer = _mlx_load(model_path)
+        transformer = st_models.Transformer(model_path)
+        pooling     = st_models.Pooling(
+            transformer.get_embedding_dimension(),
+            pooling_mode_mean_tokens=True,
+        )
+        self._st = SentenceTransformer(modules=[transformer, pooling])
 
     def encode(
         self,
         texts,
-        prompt_name: str = None,
+        prompt_name:       str  = None,
         show_progress_bar: bool = False,
-        batch_size: int = None,
+        batch_size:        int  = None,
     ) -> np.ndarray:
-        single = isinstance(texts, str)
-        if single:
-            texts = [texts]
-
         prefix = self._PREFIXES.get(prompt_name, "")
-        embeddings = []
-        for text in texts:
-            tokens = self.tokenizer.encode(prefix + text)
-            ids = mx.array([tokens])
-            out = self._model.model(ids)
-            hidden = out[0] if isinstance(out, tuple) else out
-            emb = hidden.mean(axis=1)   # [1, hidden_size]
-            mx.eval(emb)
-            embeddings.append(np.array(emb[0].tolist(), dtype=np.float32))
+        if isinstance(texts, str):
+            texts = prefix + texts
+        else:
+            texts = [prefix + t for t in texts]
 
-        result = np.stack(embeddings)
-        return result[0] if single else result
+        kwargs = {"show_progress_bar": show_progress_bar}
+        if batch_size is not None:
+            kwargs["batch_size"] = batch_size
+
+        return self._st.encode(texts, **kwargs)
 
 class doc_payload(pydantic.BaseModel):
     '''

@@ -11,7 +11,9 @@ def filter_FinDER(df, strings_to_filter):
 
 
 
-def run_finder(companies):
+def run_finder(tickers):
     # companies = ["pypl","paypal"]
     df = pd.read_parquet("/Users/nadavsmacbookair/Desktop/Thesis/data/FinDER/train.parquet")
-    return (filter_FinDER(df, companies))
+    return (filter_FinDER(df, tickers))
+
+# %%
