@@ -62,7 +62,7 @@ if __name__ == "__main__":
 
 #%%
 import pickle
-with open("/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/chunks/hierarchical/enriched/NVDA_10K_2023.pkl", "rb") as f:
+with open("/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/chunks/hierarchical/indexed-at-22-06-26/enriched/NVDA_10K_2023.pkl", "rb") as f:
     df = pickle.load(f)
 texts = (df['description'] + df['text']).tolist() if hasattr(df['text'], 'tolist') else df['text']
 

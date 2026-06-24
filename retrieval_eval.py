@@ -26,10 +26,12 @@ import pandas as pd
 # ── helpers ──────────────────────────────────────────────────────────────────
 
 def _tokens(text: str) -> set[str]:
-    """Lowercase alphabetic/numeric tokens, strip punctuation."""
+    """Lowercase alphabetic/numeric tokens, strip punctuation.
+    motivation: check word overlap, not sentene=ces. 
+    """
     return set(re.findall(r"[a-z0-9,.\-]+", text.lower()))
 
-print(_tokens('heloo, my name is "nada;v" '))
+#print(_tokens('heloo, my name is "nada;v" '))
 
 def _numbers(text: str) -> set[str]:
     """Numeric tokens: integers, decimals, negatives, comma-formatted."""

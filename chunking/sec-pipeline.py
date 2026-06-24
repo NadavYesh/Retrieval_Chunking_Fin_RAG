@@ -138,11 +138,11 @@ def build_enriched_level(
     """
     from mlx_lm import load, generate as mlx_generate
 
-    if caption_ is None:
+    if caption_ is  None:
         print("Loading phi-4 for chunk enrichment...")
         model, tokenizer = load("mlx-community/phi-4-4bit")
-    else:
-        model, tokenizer = caption_
+    # else:
+    #     model, tokenizer = caption_
 
     n = len(child_df)
     descriptions = []
@@ -199,38 +199,42 @@ def sec_chunking_pipeline_hierarchical(
     mk_file = _html_to_md(html_path, MD_PATH)
     meta    = get_meta_sec(mk_file)
 
-    doc_id, doc_df            = build_doc_level(mk_file, meta)
+    doc_id  = str(uuid.uuid4())
+    doc_df  = None
+    if doc_path is not None:
+        doc_id, doc_df = build_doc_level(mk_file, meta)
+
     header_df, header_chunks_raw = build_header_level(mk_file, meta, doc_id)
-    child_df                  = build_child_level(
-        header_chunks_raw, meta, doc_id, budget, length_function, char_splitter
-    )
-    enriched_df = build_enriched_level(child_df, caption_=caption_)
 
+    child_df = None
+    if child_path is not None or enriched_path is not None:
+        child_df = build_child_level(
+            header_chunks_raw, meta, doc_id, budget, length_function, char_splitter
+        )
 
-    for p in [doc_path, header_path, child_path,enriched_path]:
+    enriched_df = None
+    if enriched_path is not None:
+        enriched_df = build_enriched_level(child_df, caption_=caption_)
+
+    for p, df, label in [
+        (doc_path,      doc_df,      "doc chunk    "),
+        (header_path,   header_df,   "header chunks"),
+        (child_path,    child_df,    "child chunks "),
+        (enriched_path, enriched_df, "enriched chunks"),
+    ]:
+        if p is None:
+            continue
         Path(p).parent.mkdir(parents=True, exist_ok=True)
+        print(f"Saving {label} → {p}")
+        df.to_pickle(p)
 
-    print(f"Saving doc chunk     → {doc_path}")
-    doc_df.to_pickle(doc_path)
-
-    print(f"Saving header chunks → {header_path}")
-    header_df.to_pickle(header_path)
-
-    print(f"Saving child chunks  → {child_path}")
-    child_df.to_pickle(child_path)
-
-    print(f"Saving enriched chunks → {enriched_path}")
-    enriched_df.to_pickle(enriched_path)
-    
     return doc_df, header_df, child_df, enriched_df
-
-    return doc_df, header_df, child_df
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 #%%
 if __name__ == "__main__":
-    RAW_DIR  = "/Users/nadavsmacbookair/Desktop/Thesis/data/html/indexed at 22-6-26"
+    RAW_DIR  = "/Users/nadavsmacbookair/Desktop/Thesis/data/html/indexed at 26-6-26/batch_2"
     RAW_FILES = [f for f in os.listdir(RAW_DIR) if f.endswith(".html")]
     path_names = [os.path.join(RAW_DIR, f) for f in RAW_FILES]
 
@@ -244,48 +248,48 @@ if __name__ == "__main__":
         length_function=LENGTH_FUNC,
     )
 
-    BASE_CHUNKS = "/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/chunks/hierarchical"
-    BASE_MD     = "/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/md/indexed-at-22-06-26"
+    BASE_CHUNKS = "/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/chunks/hierarchical/indexed-at-26-06-26"
+    BASE_MD     = "/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/md/indexed-at-26-06-26"
 
     # Load phi-4 once for the whole batch (expensive — skip if not running level 3)
-    RUN_ENRICHED = True
+    RUN_ENRICHED = False
     caption_ = None
     if RUN_ENRICHED:
         from mlx_lm import load as mlx_load
         print("Loading phi-4-4bit...")
         caption_ = mlx_load("mlx-community/Phi-4-mini-instruct-4bit")
 
-    # for (path, name) in zip(path_names, RAW_FILES):
-    #     name        = name[:-5]
-    #     MD_PATH     = f"{BASE_MD}/{name}.md"
-    #     doc_path    = f"{BASE_CHUNKS}/doc/{name}.pkl"
-    #     header_path = f"{BASE_CHUNKS}/header/{name}.pkl"
-    #     child_path  = f"{BASE_CHUNKS}/child/{name}.pkl"
-    #     enriched_path = f"{BASE_CHUNKS}/enriched/{name}.pkl" if RUN_ENRICHED else None
-
-    #     sec_chunking_pipeline_hierarchical(
-    #         html_path=path,
-    #         doc_path=doc_path,
-    #         header_path=header_path,
-    #         child_path=child_path,
-    #         MD_PATH=MD_PATH,
-    #         budget=BUDGET,
-    #         length_function=LENGTH_FUNC,
-    #         char_splitter=CHAR_SPLITTER,
-    #         enriched_path=enriched_path,
-    #         caption_=caption_,
-    #     )
-
-
-for (path, name) in zip(path_names, RAW_FILES):
-        name = name[:-5]
-        CHILD_path = f"{BASE_CHUNKS}/child/{name}.pkl"
+    for (path, name) in zip(path_names, RAW_FILES):
+        name        = name[:-5]
         MD_PATH     = f"{BASE_MD}/{name}.md"
-        enriched_path = f"{BASE_CHUNKS}/enriched/{name}.pkl" if RUN_ENRICHED else None
-        import pickle
-        with open(CHILD_path, "rb") as f:
-            child_df = pickle.load(f)
-        print(f"starting enriching doc {name}")
-        enriched_df = build_enriched_level(child_df, caption_=caption_)
-        print(f"Saving enriched chunks → {enriched_path}")
-        enriched_df.to_pickle(enriched_path)
+        #doc_path    = f"{BASE_CHUNKS}/doc/{name}.pkl"
+        header_path = f"{BASE_CHUNKS}/header/{name}.pkl"
+        #child_path  = f"{BASE_CHUNKS}/child/{name}.pkl"
+        #enriched_path = f"{BASE_CHUNKS}/enriched/{name}.pkl" if RUN_ENRICHED else None
+
+        sec_chunking_pipeline_hierarchical(
+            html_path=path,
+            doc_path=None,
+            header_path=header_path,
+            child_path=None,
+            MD_PATH=MD_PATH,
+            budget=BUDGET,
+            length_function=LENGTH_FUNC,
+            char_splitter=CHAR_SPLITTER,
+            #enriched_path=enriched_path,
+            #caption_=caption_,
+        )
+
+
+# for (path, name) in zip(path_names, RAW_FILES):
+#         name = name[:-5]
+#         CHILD_path = f"{BASE_CHUNKS}/child/{name}.pkl"
+#         MD_PATH     = f"{BASE_MD}/{name}.md"
+#         enriched_path = f"{BASE_CHUNKS}/enriched/{name}.pkl" if RUN_ENRICHED else None
+#         import pickle
+#         with open(CHILD_path, "rb") as f:
+#             child_df = pickle.load(f)
+#         print(f"starting enriching doc {name}")
+#         enriched_df = build_enriched_level(child_df, caption_=caption_)
+#         print(f"Saving enriched chunks → {enriched_path}")
+#         enriched_df.to_pickle(enriched_path)
