@@ -2,27 +2,39 @@ import pandas as pd
 from qdrant_client import models
 from qdrant_client.models import PointStruct
 import uuid
-import json
-import re
 import time
 from datetime import datetime
 from mlx_lm import load, generate
 from db.database import get_qdrant_client
+from prompts import RAG_SYSTEM_PROMPT, SYSTEM_PROMPT
+from utils import parse_metadata_response
 
+
+
+#%%
 client = get_qdrant_client()
 
-def search_with_payload(coll_name, query_vec, payload_must=None, payload_must_not=None, payload_should=None):
+from qdrant_client import models
+
+def search_with_payload(coll_name, query_vec, payload_must=None, payload_must_not=None, payload_should=None, top_k=5):
     """
     Performs a vector search with optional payload filtering.
+    Ignores keys where the value is None. Supports lists for 'MatchAny' filtering.
     """
     must = []
     if payload_must:
         items = payload_must.items() if isinstance(payload_must, dict) else payload_must
         for k, v in items:
+            # Skip filtering if the value is explicitly None
+            if v is None:
+                continue
+                
             if k in ["fiscal_year_end", "year"]:
                 year_vals = v if isinstance(v, list) else [v]
                 year_conditions = []
                 for val in year_vals:
+                    if val is None:
+                        continue
                     try:
                         if hasattr(val, 'year'):
                             yr = val.year
@@ -48,32 +60,52 @@ def search_with_payload(coll_name, query_vec, payload_must=None, payload_must_no
                 elif len(year_conditions) > 1:
                     must.append(models.Filter(should=year_conditions))
             else:
-                must.append(models.FieldCondition(key=k, match=models.MatchValue(value=v)))
+                # Handle lists with MatchAny, scalars with MatchValue
+                if isinstance(v, list):
+                    must.append(models.FieldCondition(key=k, match=models.MatchAny(any=v)))
+                else:
+                    must.append(models.FieldCondition(key=k, match=models.MatchValue(value=v)))
     
     must_not = []    
     if payload_must_not:
         items = payload_must_not.items() if isinstance(payload_must_not, dict) else payload_must_not
         for k, v in items:
-            must_not.append(models.FieldCondition(key=k, match=models.MatchValue(value=v)))
+            if v is None:
+                continue
+            if isinstance(v, list):
+                must_not.append(models.FieldCondition(key=k, match=models.MatchAny(any=v)))
+            else:
+                must_not.append(models.FieldCondition(key=k, match=models.MatchValue(value=v)))
             
     should = []
     if payload_should:    
         items = payload_should.items() if isinstance(payload_should, dict) else payload_should
         for k, v in items:
-            should.append(models.FieldCondition(key=k, match=models.MatchValue(value=v)))
+            if v is None:
+                continue
+            if isinstance(v, list):
+                should.append(models.FieldCondition(key=k, match=models.MatchAny(any=v)))
+            else:
+                should.append(models.FieldCondition(key=k, match=models.MatchValue(value=v)))
+
+    # Only create a Filter object if there is actually something to filter
+    query_filter = None
+    if must or must_not or should:
+        query_filter = models.Filter(
+            must=must if must else None,
+            must_not=must_not if must_not else None,
+            should=should if should else None
+        )
 
     results_ = client.query_points(
         collection_name=coll_name,
         query=query_vec,
-        limit=5,
+        limit=top_k,
         with_payload=True,
-        query_filter=models.Filter(
-            must=must if must else None,
-            must_not=must_not if must_not else None,
-            should=should if should else None
-        ),
-        search_params=models.SearchParams(hnsw_ef=128, exact=False),
-        )
+        query_filter=query_filter,
+        search_params=models.SearchParams(hnsw_ef=128, exact=False)
+    )
+    
     return results_
 
 def get_all_chunks_for_payload(coll_name, payload_must=None):
@@ -131,22 +163,6 @@ def get_all_chunks_for_payload(coll_name, payload_must=None):
             break
     return all_points
 
-# LLM Search Agent Logic
-SYSTEM_PROMPT = """
-You are a financial analysis expert specializing in SEC 10-K filings. Your task is to transform a user's natural language request into a structured search object.
-
-### Instructions:
-1. **Identify the Company**: The user might mention a company name instead of a ticker. You MUST identify the correct stock ticker symbol in LOWERCASE (e.g., "Apple" -> "aapl", "Microsoft" -> "msft", "3M" -> "mmm").
-2. **Handle Fiscal Year**: The user could mention a year of interest. Extract fiscal years of interest. Use an array if multiple years are specified.
-3. **optimized_prompt**: Rewrite the user's request into a high-density financial query. Use professional terminology like 'amortization', 'revenue recognition', 'liquidity risk', 'EBITDA', 'segment reporting', and 'capital expenditures' to help a vector database find the most relevant chunks of text.
-4. **payload**: 
-   - "form_type": Always "10-k".
-   - "ticker": The stock ticker symbol in LOWERCASE.
-   - "year": The fiscal year(s) as an INTEGER or an ARRAY of INTEGERs.
-
-Return ONLY a valid JSON object.
-"""
-
 def search_agent(user_query, model, tokenizer, embed_model, coll_name, ENAHNCE_QUERY=True, BOTH = True):
     """
     1. Enhances the user query for vector search using an LLM. [depends on the boolean]
@@ -165,17 +181,10 @@ def search_agent(user_query, model, tokenizer, embed_model, coll_name, ENAHNCE_Q
     
     # Generate LLM response
     response_text = generate(model, tokenizer, prompt=prompt, verbose=False)
-    response_text = response_text.lower()
     try:
-        # Extract JSON from response
-        json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
-        if not json_match:
-            print(f"No JSON found. Raw response: {response_text}")
-            return None, None
-        data = json.loads(json_match.group())
-        opt_retr_query = data.pop("optimized_prompt", user_query)
-        
-        payload_filters = data
+        meta           = parse_metadata_response(response_text, fallback_query=user_query)
+        opt_retr_query = meta["optimized_query"]
+        payload_filters = {k: meta[k] for k in ("ticker", "year", "form_type") if meta.get(k)}
         
         # Embed the optimized prompt
         
@@ -231,15 +240,7 @@ def generate_llm_answer(user_query, search_results, model, tokenizer):
 
     context_text = "\n\n".join(context_chunks)
 
-    RAG_SYSTEM_PROMPT = """
-        You are a financial assistant expert in SEC filings. Use the provided context from 10-K filings to answer the user's question.
-        Guidelines:
-        1. Base your answer ONLY on the provided context.
-        2. Be concise. No full sentence or paragraphs are needed.
-        3. A good unswer contains numbers, percentages, and facts in a complementary fashion.
-        4. If the context doesn't contain the answer, state that you don't have the right information.
-
-    """
+    
 
     messages = [
         {"role": "system", "content": RAG_SYSTEM_PROMPT},

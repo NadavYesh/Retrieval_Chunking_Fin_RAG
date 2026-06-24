@@ -15,13 +15,17 @@ from utils import parse_metadata_response
 
 client = get_qdrant_client()
 
-COLLECTIONS = {
+COLLECTIONS_1 = {
     "doc":      {"coll_name": "--level 0", "use_parent_fetch": False},
     "header":   {"coll_name": "--level 1", "use_parent_fetch": False},
     "child":    {"coll_name": "--level 2", "use_parent_fetch": True},
     "enriched": {"coll_name": "--level 3", "use_parent_fetch": True},
 }
-PARENT_COLL = "--level 1"
+
+COLLECTIONS_2 = {
+    "header":   {"coll_name": "NVDA --level 1", "use_parent_fetch": False},
+}
+PARENT_COLL = "NVDA --level 1"
 
 
 def extract_metadata(query: str, model, tokenizer) -> dict:
@@ -45,7 +49,7 @@ def run_evaluation(
     levels:     list = None,
     ) -> pd.DataFrame:
     if levels is None:
-        levels = list(COLLECTIONS.keys())
+        levels = list(COLLECTIONS_2.keys())
     if isinstance(levels, str):
         levels = [levels]
 
@@ -70,7 +74,7 @@ def run_evaluation(
         filters = {k: meta[k] for k in ("ticker", "year", "form_type") if meta.get(k)}
 
         for level in levels:
-            level_cfg        = COLLECTIONS[level]
+            level_cfg        = COLLECTIONS_2[level] # this is where we address the collection
             coll_name        = level_cfg["coll_name"]
             use_parent_fetch = level_cfg["use_parent_fetch"]
             run_id  = f"{meta.get('ticker','?')}_{meta.get('year','?')}_{level}_{q_idx}"
@@ -84,11 +88,13 @@ def run_evaluation(
             try:
                 # retrieve
                 print(f"  [retrieve] collection='{coll_name}' filters={filters}")
-                query_tokens     = embed_tokenizer.encode(query, return_tensors="mlx")
+                ######### GEMMA SPECIFIC ##############
+                formatted_query = f"task: search result | query: {query}"
+                query_tokens     = embed_tokenizer.encode(formatted_query, return_tensors="mlx")
                 embed_outputs_    = embed_model(query_tokens)
                 # if I dont flatten, then we get an mlx object, not suitable for qdrant. 
                 query_vec = embed_outputs_.text_embeds.tolist()[0]  # flatten to plain list for Qdrant
-                results          = search_with_payload(coll_name, query_vec, payload_must=filters)
+                results          = search_with_payload(coll_name, query_vec, payload_must=filters, top_k=top_k)
                 retrieved_points = results.points if hasattr(results, "points") else []
                 context_points   = retrieved_points
                 print(f"  [retrieve] {len(retrieved_points)} hits | scores={[round(p.score, 3) for p in retrieved_points]}")
@@ -114,6 +120,7 @@ def run_evaluation(
                     rag_answer = "No relevant context retrieved."
                 else:
                     wrapped    = SimpleNamespace(points=context_points)
+                    print(context_points)
                     rag_answer, _ = generate_llm_answer(meta["optimized_query"], wrapped, gen_model, gen_tokenizer)
                     print(f"  [generate] {len(rag_answer)} chars: {rag_answer[:120].strip()}{'...' if len(rag_answer) > 120 else ''}")
 
@@ -156,7 +163,7 @@ def run_evaluation(
 #%%
 if __name__ == "__main__":
     tickers   = ["nvda"]
-    finder_df = run_finder(tickers=tickers).head(2)
+    finder_df = run_finder(tickers=tickers).head(5)
     print("Loading generation model...")
     gen_model, gen_tokenizer = load("mlx-community/Llama-3.2-3B-Instruct-4bit")
 
@@ -168,8 +175,8 @@ if __name__ == "__main__":
         gen_tokenizer=gen_tokenizer,
         embed_model=embed_model,
         embed_tokenizer = embed_tokenizer,
+        top_k=6,        
         levels=["header"],
-        top_k=1
     )
     print(results)
 

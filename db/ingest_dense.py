@@ -10,7 +10,7 @@ import pandas as pd
 from datetime import datetime
 from qdrant_client import models as qdrant_models
 from qdrant_client.models import PointStruct, VectorParams, Distance
-from models import doc_payload, MLXEmbedder
+from models import doc_payload
 from db.database import get_qdrant_client
 from db.utils import get_batches
 from mlx_embeddings import load as emb_load
@@ -22,10 +22,10 @@ client = get_qdrant_client()
 
 ######################
 # Configuration
-COLL_NAME = "--level 3"
+COLL_NAME = "NVDA --level 1"
 EMBED_META = False
 import os
-path_ = "/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/chunks/hierarchical/indexed-at-22-06-26/enriched"
+path_ = "/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/chunks/hierarchical/indexed-at-26-06-26/header"
 files = os.listdir(path_)
 files = [f for f in files if f.endswith(".pkl")]
 paths=[os.path.join(path_,f)for f in files]
@@ -79,6 +79,15 @@ def init_collection():
         ),
     )
 
+def fmt_title(b):
+    fields = [
+        ("ticker", b.get("ticker")),
+        ("fiscal year end", b.get("fiscal_year_end")),
+        ("subsection", b.get("subsection")),
+        ("item", b.get("item")),
+    ]
+    return "title: " + ", ".join(f"{k}: {v}" for k, v in fields if v)
+
 def get_embedding(texts, model, tokenizer):
     """ 
     Returns embeddings for batch processing.  
@@ -88,7 +97,7 @@ def get_embedding(texts, model, tokenizer):
         inputs["input_ids"],
         attention_mask=inputs["attention_mask"]
     )
-    return outputs.text_embeds.tolist()[0] # mean pooled and normalized embeddings
+    return outputs.text_embeds.tolist() # mean pooled and normalized embeddings
 
 def upsert_data():
     print(f"WARNING: are you absolutuley sure you want to ingest data? Make sure you are not replicating.\nthis is collection {COLL_NAME}")
@@ -99,8 +108,6 @@ def upsert_data():
     
 
     embed_model, embed_tokenizer = emb_load("mlx-community/embeddinggemma-300m-bf16")
-
-    model = MLXEmbedder("mlx-community/embeddinggemma-300m-bf16")
 
     upsert_batch = 42
     encode_batch = 6
@@ -146,16 +153,16 @@ def upsert_data():
         for batch_idx, (batch_texts, batch_metadatas, batch_ids, batch_raw) in enumerate(batches):
 
             print(f"  Encoding batch {batch_idx + 1}...")
-            doc_title = f"10-K filing for ticker: {batch_metadatas.get("ticker")}, fiscal year end: {batch_metadatas.get("fiscal_year_end")}"
+            # doc_title = f"10-K filing for ticker: {batch_metadatas.get("ticker")}, fiscal year end: {batch_metadatas.get("fiscal_year_end")}"
             # formatted_docs contains the gemma-specific prompt style of "title: | text:"
 
             #f"title: {doc_title} | text: {batch_texts}"
-            breakpoint()
+            
             batch_texts_prompt          = [f" | text: {b}" for b in batch_texts]
-            batch_metadatas_prompt      =  [f"title: {b}" for b in batch_texts]
-            formatted_doc = [b_meta + b_txt for (b_meta,b_txt) in zip(batch_metadatas_prompt, batch_metadatas_prompt)]
+            # only include nonempty metas
+            batch_metadatas_prompt      = [fmt_title(b) for b in batch_metadatas]
+            formatted_doc = [b_meta + b_txt for (b_meta,b_txt) in zip(batch_metadatas_prompt, batch_texts_prompt)]
             embeddings = get_embedding(formatted_doc, embed_model, embed_tokenizer)
-
             # embeddings = model.encode(
             #     batch_texts,
             #     prompt_name="document",
