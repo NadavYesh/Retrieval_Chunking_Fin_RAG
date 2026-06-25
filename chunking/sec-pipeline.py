@@ -6,20 +6,12 @@ import uuid
 import pandas as pd
 import pickle
 import tiktoken
+# from prompts import ENRICH_CHUNKS_PROMPT need to fix path
 from metadata_extractor import get_meta_sec, sec_metadata
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from sec_processing import sec_to_mk, sec_splitter_headers, enrich_md_text, inject_header_placeholders, chunk_document
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Shared prompt used by build_enriched_level
-# ─────────────────────────────────────────────────────────────────────────────
-_ENRICH_SYSTEM_PROMPT = (
-    "You are a financial analyst. Write a concise, factual summary of the following "
-    "SEC filing excerpt in 2-3 sentences. If the excerpt contains a table, describe "
-    "the nature of the figures (e.g. revenue by segment, year-over-year changes, "
-    "basis points). Be specific; avoid generic statements."
-)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -149,7 +141,7 @@ def build_enriched_level(
 
     for i, (_, row) in enumerate(child_df.iterrows()):
         messages = [
-            {"role": "system", "content": _ENRICH_SYSTEM_PROMPT},
+            {"role": "system", "content": ENRICH_CHUNKS_PROMPT},
             {"role": "user",   "content": row["text"]},
         ]
         prompt = tokenizer.apply_chat_template(
@@ -248,8 +240,8 @@ if __name__ == "__main__":
         length_function=LENGTH_FUNC,
     )
 
-    BASE_CHUNKS = "/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/chunks/hierarchical/indexed-at-26-06-26"
-    BASE_MD     = "/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/md/indexed-at-26-06-26"
+    BASE_CHUNKS = "/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/chunks/hierarchical/indexed-at-26-06-26/header/batch_2"
+    BASE_MD     = "/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/md/indexed-at-26-06-26/batch_2"
 
     # Load phi-4 once for the whole batch (expensive — skip if not running level 3)
     RUN_ENRICHED = False

@@ -80,3 +80,13 @@ Guidelines:
 Original query: {query}
 Enhanced query:\
 """
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Shared prompt used by build_enriched_level
+# ─────────────────────────────────────────────────────────────────────────────
+ENRICH_CHUNKS_PROMPT = (
+    "You are a financial analyst. Write a concise, factual summary of the following "
+    "SEC filing excerpt in 2-3 sentences. If the excerpt contains a table, describe "
+    "the nature of the figures (e.g. revenue by segment, year-over-year changes, "
+    "basis points). Be specific; avoid generic statements."
+)

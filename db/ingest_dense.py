@@ -22,10 +22,10 @@ client = get_qdrant_client()
 
 ######################
 # Configuration
-COLL_NAME = "NVDA --level 1"
-EMBED_META = False
+COLL_NAME = "--level 1 Min"
+EMBED_META = False # this is misleading, as the current file embed textual meta.
 import os
-path_ = "/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/chunks/hierarchical/indexed-at-26-06-26/header"
+path_ = "/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/chunks/hierarchical/indexed-at-26-06-26/header/batch_2"
 files = os.listdir(path_)
 files = [f for f in files if f.endswith(".pkl")]
 paths=[os.path.join(path_,f)for f in files]
@@ -56,7 +56,7 @@ def init_collection():
     for field in ["doc_id", "parent_id"]:
         client.create_payload_index(COLL_NAME, field, qdrant_models.PayloadSchemaType.KEYWORD)
 
-    # this will allow bm25
+
     client.create_payload_index(
         collection_name=COLL_NAME,
         field_name="text",

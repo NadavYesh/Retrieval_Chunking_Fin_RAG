@@ -252,6 +252,6 @@ def generate_llm_answer(user_query, search_results, model, tokenizer):
     )
 
     # Generate response
-    generated_text = generate(model, tokenizer, prompt=prompt, verbose=False)
+    generated_text = generate(model, tokenizer, prompt=prompt, verbose=False, max_tokens=1024)
     
     return generated_text.strip(), context_chunks
