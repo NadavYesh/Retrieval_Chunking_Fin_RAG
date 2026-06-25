@@ -6,7 +6,7 @@ import time
 from datetime import datetime
 from mlx_lm import load, generate
 from db.database import get_qdrant_client
-from prompts import RAG_SYSTEM_PROMPT, SYSTEM_PROMPT
+from prompts import RAG_ANSWER_PROMPT, META_EXTRACT_PROMPT
 from utils import parse_metadata_response
 
 
@@ -171,7 +171,7 @@ def search_agent(user_query, model, tokenizer, embed_model, coll_name, ENAHNCE_Q
     4. Calls search_with_payload to get results.
     """
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": META_EXTRACT_PROMPT},
         {"role": "user", "content": user_query}
     ]
     
@@ -243,7 +243,7 @@ def generate_llm_answer(user_query, search_results, model, tokenizer):
     
 
     messages = [
-        {"role": "system", "content": RAG_SYSTEM_PROMPT},
+        {"role": "system", "content": RAG_ANSWER_PROMPT},
         {"role": "user", "content": f"Context:\n{context_text}\n\n Question: {user_query}"}
     ]
 

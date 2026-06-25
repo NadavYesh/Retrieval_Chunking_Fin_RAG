@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pandas as pd
 
 from search_engine import search_with_payload, generate_llm_answer
-from prompts import SYSTEM_PROMPT
+from prompts import META_EXTRACT_PROMPT, QUERY_ENHANCEMENT_PROMPT
 from FinDER import run_finder
 from db.database import get_qdrant_client
 from mlx_lm import generate, load
@@ -14,7 +14,7 @@ from mlx_embeddings.utils import load as emb_load
 from utils import parse_metadata_response
 
 client = get_qdrant_client()
-
+#%%
 COLLECTIONS_1 = {
     "doc":      {"coll_name": "--level 0", "use_parent_fetch": False},
     "header":   {"coll_name": "--level 1", "use_parent_fetch": False},
@@ -23,19 +23,26 @@ COLLECTIONS_1 = {
 }
 
 COLLECTIONS_2 = {
-    "header":   {"coll_name": "NVDA --level 1", "use_parent_fetch": False},
+    "header":   {"coll_name": "--level 1 Min", "use_parent_fetch": False},
 }
-PARENT_COLL = "NVDA --level 1"
+PARENT_COLL = "--level 1 Min"
 
 
 def extract_metadata(query: str, model, tokenizer) -> dict:
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": META_EXTRACT_PROMPT},
         {"role": "user",   "content": query},
     ]
     prompt   = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     response = generate(model, tokenizer, prompt=prompt, verbose=False)
     return parse_metadata_response(response, fallback_query=query)
+
+
+def enhance_query(query: str, model, tokenizer) -> str:
+    prompt = QUERY_ENHANCEMENT_PROMPT.format(query=query)
+    messages = [{"role": "user", "content": prompt}]
+    formatted = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    return generate(model, tokenizer, prompt=formatted, verbose=False).strip()
 
 
 def run_evaluation(
@@ -47,6 +54,7 @@ def run_evaluation(
     output_dir: str  = "/Users/nadavsmacbookair/Desktop/Thesis/data/eval_results",
     top_k:      int  = 5,
     levels:     list = None,
+    enhance_query_flag: bool = False, # controlls from enhancing.
     ) -> pd.DataFrame:
     if levels is None:
         levels = list(COLLECTIONS_2.keys())
@@ -66,6 +74,10 @@ def run_evaluation(
         truth_answer = row.get("truth_answer", "")
         truth_ref    = row.get("truth_ref", "")
         print(f"\n[Q {q_idx+1}/{len(finder_df)}] {query[:80]}...")
+
+        if enhance_query_flag:
+            query = enhance_query(query, gen_model, gen_tokenizer)
+            print(f"  [enhance] → {query[:120]}...")
 
         meta = extract_metadata(query, gen_model, gen_tokenizer)
         print(f"  ticker={meta['ticker']} year={meta['year']} form_type={meta['form_type']}")
@@ -162,8 +174,8 @@ def run_evaluation(
 
 #%%
 if __name__ == "__main__":
-    tickers   = ["nvda"]
-    finder_df = run_finder(tickers=tickers).head(5)
+    tickers   = ["nvda","wmt"]
+    finder_df = run_finder(tickers=tickers)
     print("Loading generation model...")
     gen_model, gen_tokenizer = load("mlx-community/Llama-3.2-3B-Instruct-4bit")
 
@@ -175,7 +187,8 @@ if __name__ == "__main__":
         gen_tokenizer=gen_tokenizer,
         embed_model=embed_model,
         embed_tokenizer = embed_tokenizer,
-        top_k=6,        
+        top_k=6,
+        enhance_query_flag=True,        
         levels=["header"],
     )
     print(results)

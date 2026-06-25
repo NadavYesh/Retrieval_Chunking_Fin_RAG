@@ -3,7 +3,7 @@
 
 # Used in search_engine.py → generate_llm_answer()
 # Instructs the RAG model to answer strictly from retrieved 10-K context.
-RAG_SYSTEM_PROMPT = '''
+RAG_ANSWER_PROMPT = '''
         You are a financial assistant expert in SEC filings. Use the provided context from 10-K filings to answer the user's question.
         Guidelines:
         1. Base your answer on the provided context.
@@ -15,7 +15,7 @@ RAG_SYSTEM_PROMPT = '''
 
 # Used in search_engine.py → search_agent() and langgraph_pipeline.py → query_optimizer_node()
 # Instructs the LLM to extract ticker/year metadata and rewrite the query for vector search.
-SYSTEM_PROMPT = """
+META_EXTRACT_PROMPT = """
 You are a financial analysis expert specializing in SEC 10-K filings. Your task is to transform a user's natural language request into a structured search object.
 
 ### Instructions:
@@ -60,4 +60,23 @@ if assistant B is better, and "[[C]]" for a tie.
 [The Start of Assistant B's Answer]
 {answer_b}
 [The End of Assistant B's Answer]\
+"""
+
+# Used in eval_new.py → enhance_query() when enhance_query_flag=True
+# Rewrites a short/shorthand user query into a richer semantic search query for RAG retrieval.
+QUERY_ENHANCEMENT_PROMPT = """\
+You are a financial search query optimizer for a RAG system that retrieves passages from SEC 10-K filings.
+
+Your task: rewrite the user's query into an enhanced version that maximizes semantic and contextual retrieval quality.
+
+Guidelines:
+1. Expand abbreviations and shorthand using financial domain knowledge (e.g., "rev" → "revenue", "opt" → "operating income / operations", "capex" → "capital expenditures", "D&A" → "depreciation and amortization", "FCF" → "free cash flow", "EPS" → "earnings per share").
+2. Add relevant financial synonyms and related concepts that are likely to appear in 10-K filings (e.g., if asked about "profit", also surface "net income", "operating income", "gross margin").
+3. Use formal SEC filing language and professional financial terminology.
+4. Keep the enhanced query focused and concise — do NOT add speculative content unrelated to the original intent.
+5. Preserve any company names, tickers, or fiscal years present in the original query.
+6. Output ONLY the enhanced query text, nothing else.
+
+Original query: {query}
+Enhanced query:\
 """
