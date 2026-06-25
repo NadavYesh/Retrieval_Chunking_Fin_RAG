@@ -34,32 +34,39 @@ Return ONLY a valid JSON object.
 # Binary relevance classifier: replies YES/NO to gate retrieval quality.
 GRADER_SYSTEM_PROMPT = "You are a grader evaluating the relevance of a retrieved document to a user question. Respond ONLY with 'YES' if the document is relevant, or 'NO' if it is not."
 
-# Used in eval_pipeline.py → pairwise LLM-judge evaluation.
-# MT-Bench style judge; returns [[A]], [[B]], or [[C]].
+# Used in eval_pipeline.py → single-answer LLM-judge evaluation.
+# Scores relevance (is the answer on-topic?) and completeness (does it cover the key facts from ground truth?).
+# Returns a JSON object with two scores and a brief rationale.
 JUDGE_PROMPT = """\
 [System]
-Please act as an impartial judge and evaluate the quality of the responses provided by two \
-AI assistants to the user question displayed below. Your evaluation should consider \
-correctness and helpfulness. You will be given a reference answer, assistant A's answer, \
-and assistant B's answer. Your job is to evaluate which assistant's answer is better. \
-Begin your evaluation by comparing both assistants' answers with the reference answer. \
-Identify and correct any mistakes. Avoid any position biases and ensure that the order in \
-which the responses were presented does not influence your decision. Do not allow the \
-length of the responses to influence your evaluation. Do not favor certain names of the \
-assistants. Be as objective as possible. After providing your explanation, output your \
-final verdict by strictly following this format: "[[A]]" if assistant A is better, "[[B]]" \
-if assistant B is better, and "[[C]]" for a tie.
+You are an impartial judge evaluating a single AI assistant's answer to a financial question.
+You will be given:
+  - The user question
+  - A ground truth reference answer
+  - The assistant's answer to evaluate
+
+Score the assistant's answer on two dimensions (each 1–5):
+
+1. **Relevance** — Does the assistant's answer directly address the user's question? \
+[YES] means the answer is fully on-topic and answers exactly what was asked. \
+[NO] means the answer is off-topic or does not address the question at all.
+
+2. **Completeness** — Does the assistant's answer include the main components present in the ground truth answer? \
+Identify the key facts, figures, and concepts in the reference answer, then check how many are covered. \
+[YES] means all main components are present.
+[NO] means almost none are covered.
+
+Be objective. Do not reward length or fluency if the key facts are missing.
+
+After your brief rationale (2–4 sentences), output your decisions strictly in this JSON format:
+{{"relevance": <YES/NO>, "completeness": <YES/NO>}}
+
 [User Question]
 {question}
-[The Start of Reference Answer]
+[Ground Truth Reference Answer]
 {answer_ref}
-[The End of Reference Answer]
-[The Start of Assistant A's Answer]
+[Assistant's Answer]
 {answer_a}
-[The End of Assistant A's Answer]
-[The Start of Assistant B's Answer]
-{answer_b}
-[The End of Assistant B's Answer]\
 """
 
 # Used in eval_new.py → enhance_query() when enhance_query_flag=True

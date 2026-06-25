@@ -22,7 +22,7 @@ client = get_qdrant_client()
 
 ######################
 # Configuration
-COLL_NAME = "--level 1 Min"
+COLL_NAME_DENSE = "--level 1 DENSE"
 EMBED_META = False # this is misleading, as the current file embed textual meta.
 import os
 path_ = "/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/chunks/hierarchical/indexed-at-26-06-26/header/batch_2"
@@ -35,30 +35,30 @@ CHUNK_PATHS = paths
 def init_collection():
     try:
         client.create_collection(
-            collection_name=COLL_NAME,
+            collection_name=COLL_NAME_DENSE,
             vectors_config=VectorParams(size=768, distance=Distance.COSINE),
             on_disk_payload=True
         )
-        print(f"Collection {COLL_NAME} created.")
+        print(f"Collection {COLL_NAME_DENSE} created.")
     except Exception:
-        print(f"Collection {COLL_NAME} already exists.")
+        print(f"Collection {COLL_NAME_DENSE} already exists.")
 
     # Create indices by type. not everything must have a value
     fields = ["form_type", "company_name", "ticker"]
     for field in fields:
-        client.create_payload_index(COLL_NAME, field, qdrant_models.PayloadSchemaType.KEYWORD)
+        client.create_payload_index(COLL_NAME_DENSE, field, qdrant_models.PayloadSchemaType.KEYWORD)
 
-    client.create_payload_index(COLL_NAME, "fiscal_year_end", qdrant_models.PayloadSchemaType.DATETIME)
+    client.create_payload_index(COLL_NAME_DENSE, "fiscal_year_end", qdrant_models.PayloadSchemaType.DATETIME)
 
     for field in ["section", "subsection", "item"]:
-        client.create_payload_index(COLL_NAME, field, qdrant_models.PayloadSchemaType.TEXT)
+        client.create_payload_index(COLL_NAME_DENSE, field, qdrant_models.PayloadSchemaType.TEXT)
 
     for field in ["doc_id", "parent_id"]:
-        client.create_payload_index(COLL_NAME, field, qdrant_models.PayloadSchemaType.KEYWORD)
+        client.create_payload_index(COLL_NAME_DENSE, field, qdrant_models.PayloadSchemaType.KEYWORD)
 
 
     client.create_payload_index(
-        collection_name=COLL_NAME,
+        collection_name=COLL_NAME_DENSE,
         field_name="text",
         field_schema=qdrant_models.TextIndexParams(
             type=qdrant_models.TextIndexType.TEXT,
@@ -69,7 +69,7 @@ def init_collection():
     )
     # only for enriched
     client.create_payload_index(
-        collection_name=COLL_NAME,
+        collection_name=COLL_NAME_DENSE,
         field_name="description",
         field_schema=qdrant_models.TextIndexParams(
             type=qdrant_models.TextIndexType.TEXT,
@@ -100,7 +100,7 @@ def get_embedding(texts, model, tokenizer):
     return outputs.text_embeds.tolist() # mean pooled and normalized embeddings
 
 def upsert_data():
-    print(f"WARNING: are you absolutuley sure you want to ingest data? Make sure you are not replicating.\nthis is collection {COLL_NAME}")
+    print(f"WARNING: are you absolutuley sure you want to ingest data? Make sure you are not replicating.\nthis is collection {COLL_NAME_DENSE}")
     confirm = input("Type 'y' to proceed with ingestion: ")
     if confirm.lower() != 'y':
         print("Ingestion aborted.")
@@ -189,11 +189,11 @@ def upsert_data():
                     )
                 )
             try:
-                client.upsert(collection_name=COLL_NAME, wait=True, points=points)
+                client.upsert(collection_name=COLL_NAME_DENSE, wait=True, points=points)
             except ValueError as e:
                 print(pt.id for pt in points)
         
-def remove_points_from_pkl(pkl_path, collection_name=COLL_NAME):
+def remove_points_from_pkl(pkl_path, collection_name=COLL_NAME_DENSE):
     """
     Removes points from the Qdrant collection using IDs extracted from a pickle file.
     """

@@ -18,7 +18,7 @@ from db.utils import get_batches
 
 client = get_qdrant_client()
 
-COLLECTION_NAME = "--level 1 BM25"
+COLL_NAME_SPARSE = "--level 1 BM25"
 BATCH_SIZE      = 64
 
 path_ = "/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/chunks/hierarchical/indexed-at-26-06-26/header"
@@ -29,27 +29,27 @@ CHUNK_PATHS = [os.path.join(path_, f) for f in files]
 def init_collection():
     try:
         client.create_collection(
-            collection_name=COLLECTION_NAME,
+            collection_name=COLL_NAME_SPARSE,
             sparse_vectors_config={
                 "bm25": models.SparseVectorParams(modifier=models.Modifier.IDF)
             },
             on_disk_payload=True,
         )
-        print(f"Collection '{COLLECTION_NAME}' created.")
+        print(f"Collection '{COLL_NAME_SPARSE}' created.")
     except Exception:
-        print(f"Collection '{COLLECTION_NAME}' already exists — skipping creation.")
+        print(f"Collection '{COLL_NAME_SPARSE}' already exists — skipping creation.")
 
     for field in ["form_type", "company_name", "ticker", "doc_id", "parent_id"]:
-        client.create_payload_index(COLLECTION_NAME, field, models.PayloadSchemaType.KEYWORD)
+        client.create_payload_index(COLL_NAME_SPARSE, field, models.PayloadSchemaType.KEYWORD)
 
-    client.create_payload_index(COLLECTION_NAME, "fiscal_year_end", models.PayloadSchemaType.DATETIME)
+    client.create_payload_index(COLL_NAME_SPARSE, "fiscal_year_end", models.PayloadSchemaType.DATETIME)
 
     for field in ["section", "subsection", "item"]:
-        client.create_payload_index(COLLECTION_NAME, field, models.PayloadSchemaType.TEXT)
+        client.create_payload_index(COLL_NAME_SPARSE, field, models.PayloadSchemaType.TEXT)
 
 
 def upsert_bm25_data():
-    print(f"WARNING: ingesting into '{COLLECTION_NAME}'. Make sure you are not duplicating.")
+    print(f"WARNING: ingesting into '{COLL_NAME_SPARSE}'. Make sure you are not duplicating.")
     confirm = input("Type 'y' to proceed: ")
     if confirm.lower() != "y":
         print("Ingestion aborted.")
@@ -93,7 +93,7 @@ def upsert_bm25_data():
                     )
                 )
 
-            client.upsert(collection_name=COLLECTION_NAME, wait=True, points=points)
+            client.upsert(collection_name=COLL_NAME_SPARSE, wait=True, points=points)
             total_points += len(points)
             print(f"  Batch {batch_idx + 1}: upserted {len(points)} points (total so far: {total_points})")
 

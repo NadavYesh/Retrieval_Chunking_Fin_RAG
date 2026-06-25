@@ -16,97 +16,113 @@ client = get_qdrant_client()
 
 from qdrant_client import models
 
-def search_with_payload(coll_name, query_vec, payload_must=None, payload_must_not=None, payload_should=None, top_k=5):
-    """
-    Performs a vector search with optional payload filtering.
-    Ignores keys where the value is None. Supports lists for 'MatchAny' filtering.
-    """
-    must = []
-    if payload_must:
-        items = payload_must.items() if isinstance(payload_must, dict) else payload_must
+def _build_filter(payload_must=None, payload_must_not=None, payload_should=None):
+    """Build a qdrant Filter from payload dicts. Returns None if no conditions."""
+    def _conditions(mapping):
+        conds = []
+        if not mapping:
+            return conds
+        items = mapping.items() if isinstance(mapping, dict) else mapping
         for k, v in items:
-            # Skip filtering if the value is explicitly None
             if v is None:
                 continue
-                
             if k in ["fiscal_year_end", "year"]:
                 year_vals = v if isinstance(v, list) else [v]
-                year_conditions = []
+                year_conds = []
                 for val in year_vals:
                     if val is None:
                         continue
                     try:
-                        if hasattr(val, 'year'):
+                        if hasattr(val, "year"):
                             yr = val.year
                         elif isinstance(val, str):
                             yr = int(val[:4])
                         else:
                             yr = int(val)
-                        
-                        year_conditions.append(
+                        year_conds.append(
                             models.FieldCondition(
                                 key="fiscal_year_end",
                                 range=models.DatetimeRange(
                                     gte=f"{yr}-01-01T00:00:00Z",
-                                    lte=f"{yr}-12-31T23:59:59Z"
-                                )
+                                    lte=f"{yr}-12-31T23:59:59Z",
+                                ),
                             )
                         )
                     except (ValueError, TypeError) as e:
                         print(f"Warning: Could not parse year from {val}: {e}")
-                
-                if len(year_conditions) == 1:
-                    must.append(year_conditions[0])
-                elif len(year_conditions) > 1:
-                    must.append(models.Filter(should=year_conditions))
+                if len(year_conds) == 1:
+                    conds.append(year_conds[0])
+                elif len(year_conds) > 1:
+                    conds.append(models.Filter(should=year_conds))
             else:
-                # Handle lists with MatchAny, scalars with MatchValue
                 if isinstance(v, list):
-                    must.append(models.FieldCondition(key=k, match=models.MatchAny(any=v)))
+                    conds.append(models.FieldCondition(key=k, match=models.MatchAny(any=v)))
                 else:
-                    must.append(models.FieldCondition(key=k, match=models.MatchValue(value=v)))
-    
-    must_not = []    
-    if payload_must_not:
-        items = payload_must_not.items() if isinstance(payload_must_not, dict) else payload_must_not
-        for k, v in items:
-            if v is None:
-                continue
-            if isinstance(v, list):
-                must_not.append(models.FieldCondition(key=k, match=models.MatchAny(any=v)))
-            else:
-                must_not.append(models.FieldCondition(key=k, match=models.MatchValue(value=v)))
-            
-    should = []
-    if payload_should:    
-        items = payload_should.items() if isinstance(payload_should, dict) else payload_should
-        for k, v in items:
-            if v is None:
-                continue
-            if isinstance(v, list):
-                should.append(models.FieldCondition(key=k, match=models.MatchAny(any=v)))
-            else:
-                should.append(models.FieldCondition(key=k, match=models.MatchValue(value=v)))
+                    conds.append(models.FieldCondition(key=k, match=models.MatchValue(value=v)))
+        return conds
 
-    # Only create a Filter object if there is actually something to filter
-    query_filter = None
+    must     = _conditions(payload_must)
+    must_not = _conditions(payload_must_not)
+    should   = _conditions(payload_should)
+
     if must or must_not or should:
-        query_filter = models.Filter(
-            must=must if must else None,
-            must_not=must_not if must_not else None,
-            should=should if should else None
+        return models.Filter(
+            must=must or None,
+            must_not=must_not or None,
+            should=should or None,
         )
+    return None
 
+
+def search_with_payload(coll_name, query_vec, payload_must=None, payload_must_not=None, payload_should=None, top_k=5):
+    """Dense vector search with optional payload filtering."""
+    query_filter = _build_filter(payload_must, payload_must_not, payload_should)
     results_ = client.query_points(
         collection_name=coll_name,
         query=query_vec,
         limit=top_k,
         with_payload=True,
         query_filter=query_filter,
-        search_params=models.SearchParams(hnsw_ef=128, exact=False)
+        search_params=models.SearchParams(hnsw_ef=128, exact=False),
     )
-    
     return results_
+
+
+def search_bm25(coll_name_sparse, query_text, payload_must=None, top_k=5):
+    """BM25 sparse search against a collection ingested with qdrant/bm25 model."""
+    query_filter = _build_filter(payload_must)
+    results_ = client.query_points(
+        collection_name=coll_name_sparse,
+        query=models.Document(text=query_text, model="qdrant/bm25"),
+        using="bm25",
+        limit=top_k,
+        with_payload=True,
+        query_filter=query_filter,
+    )
+    return results_
+
+
+def rrf_fuse(dense_results, sparse_results, k: int = 60, top_k: int = 6) -> list:
+    """
+    Reciprocal Rank Fusion of dense and sparse result sets.
+    Returns a plain list of ScoredPoints (up to top_k), sorted by RRF score descending.
+    Points present in only one result set still get partial credit.
+    """
+    scores: dict = {}
+    point_map: dict = {}
+
+    dense_pts  = dense_results.points  if hasattr(dense_results,  "points") else (dense_results  or [])
+    sparse_pts = sparse_results.points if hasattr(sparse_results, "points") else (sparse_results or [])
+
+    for rank, p in enumerate(dense_pts):
+        scores[p.id]    = scores.get(p.id, 0.0) + 1.0 / (k + rank + 1)
+        point_map[p.id] = p
+    for rank, p in enumerate(sparse_pts):
+        scores[p.id] = scores.get(p.id, 0.0) + 1.0 / (k + rank + 1)
+        point_map.setdefault(p.id, p)
+
+    sorted_ids = sorted(scores, key=scores.__getitem__, reverse=True)[:top_k]
+    return [point_map[pid] for pid in sorted_ids if pid in point_map]
 
 def get_all_chunks_for_payload(coll_name, payload_must=None):
     """
