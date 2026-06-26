@@ -80,21 +80,25 @@ def upsert_sparse_data():
             print(f"  Processing batch {batch_idx + 1}...")
             points = []
             for idx, (metadata, text, p_id) in enumerate(zip(batch_metadatas, batch_texts, batch_ids)):
+                stored_text = text[text.index("'text':")+8:] if EMBED_META else text
+                if isinstance(stored_text, str):
+                    stored_text = stored_text.lower()
                 try:
                     validated_payload = doc_payload(**metadata).model_dump()
-                    validated_payload["text"] = text[text.index("'text':")+8:] if EMBED_META else text
+                    validated_payload["text"] = stored_text
                     payload = validated_payload
                 except Exception as e:
                     print(f"    Warning: Metadata validation failed: {e}")
                     payload = metadata.copy()
-                    payload["text"] = text
-                    
+                    payload["text"] = stored_text
+
+                text_lower = text.lower() if isinstance(text, str) else text
                 points.append(
                     PointStruct(
-                        id=p_id, 
+                        id=p_id,
                         vector={
                             "text": models.Document(
-                                text=text,
+                                text=text_lower,
                                 model="qdrant/bm25",
                             )
                         },

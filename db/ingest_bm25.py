@@ -20,7 +20,6 @@ client = get_qdrant_client()
 
 COLL_NAME_SPARSE = "--level 1 BM25"
 BATCH_SIZE      = 64
-
 path_ = "/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/chunks/hierarchical/indexed-at-26-06-26/header"
 files = [f for f in os.listdir(path_) if f.endswith(".pkl")]
 CHUNK_PATHS = [os.path.join(path_, f) for f in files]
