@@ -21,6 +21,8 @@ Usage:
     python analysis.py [path/to/eval_YYYYMMDD_HHMM.json]
 """
 
+import contextlib
+import io
 import json
 import pickle
 import re
@@ -643,34 +645,35 @@ def print_judge_summary(rows: list[dict], use_llm_judge: bool) -> None:
         print()
 
 
-# ── Main ─────────────────────────────────────────────────────────────────────
+# ── Core analysis (callable directly for batch runs) ─────────────────────────
 
-def main():
+def run_analysis(
+    eval_path:    Path,
+    corpus:       pd.DataFrame,
+    fp_index:     dict,
+    use_llm_judge: bool = False,
+    judge_model   = None,   # pre-loaded Phi-4 model; only used when use_llm_judge=True
+    judge_tok     = None,
+) -> None:
     """
-    Entry point. Loads the eval JSON, the PKL corpus, runs per-query analysis,
-    prints four report sections (per-query table, truth lookup, retrieval summary,
-    answer quality summary), and saves results to a CSV next to the eval file.
+    Analyse one eval JSON file and save a CSV + TXT report alongside it.
 
-    CLI flags:
-      positional arg  : path to eval JSON (default: EVAL_FILE constant)
-      --judge         : enable Phi-4 LLM judge in addition to the lexical judge
+    Accepts pre-loaded corpus and judge model so batch callers can load them
+    once and reuse across multiple eval files.
 
-    The eval JSON is column-oriented: each top-level key is a column name, and its
-    value is a dict of {row_index_str: value}. This is the pandas to_json() default
-    orient='columns' format produced by run_rag.py.
+    Parameters
+    ----------
+    eval_path     : path to an eval JSON produced by run_rag.py
+    corpus        : full PKL corpus DataFrame from load_corpus()
+    fp_index      : fingerprint index from load_corpus()
+    use_llm_judge : whether to run the Phi-4 LLM judge
+    judge_model   : pre-loaded Phi-4 model (required when use_llm_judge=True)
+    judge_tok     : tokenizer paired with judge_model
     """
-    use_llm_judge = "--judge" in sys.argv
-    positional    = [a for a in sys.argv[1:] if not a.startswith("--")]
-    eval_path     = Path(positional[0]) if positional else EVAL_FILE
-
     print(f"\nEval file : {eval_path}")
-    print(f"LLM judge : {'Phi-4 (enabled)' if use_llm_judge else 'disabled (pass --judge to enable)'}")
+    print(f"LLM judge : {'Phi-4 (enabled)' if use_llm_judge else 'disabled'}")
     with open(eval_path) as f:
         data = json.load(f)
-
-    print(f"Corpus dir: {CHUNKS_DIR}")
-    corpus, fp_index = load_corpus()
-    print(f"  Loaded {len(corpus)} chunks from {corpus['source_file'].nunique()} PKL files")
 
     indices = sorted(data["run_id"].keys(), key=int)
     print(f"  Analyzing {len(indices)} rows …")
@@ -688,11 +691,8 @@ def main():
         row.update(judge_lexical(row.get("rag_answer", ""), row.get("truth_answer", "")))
 
     # ── LLM judge — optional, post-hoc, uses Phi-4 ──
-    if use_llm_judge:
-        from mlx_lm import load as mlx_load
-        print("\nLoading Phi-4 judge model…")
-        judge_model, judge_tok = mlx_load("mlx-community/phi-4-4bit")
-        print(f"  Judging {len(rows)} rows…")
+    if use_llm_judge and judge_model is not None:
+        print(f"  Judging {len(rows)} rows with Phi-4…")
         for i, row in enumerate(rows):
             scores = judge_llm(
                 row["query"],
@@ -705,15 +705,86 @@ def main():
             sys.stdout.flush()
         print()
 
-    print_per_query_table(rows)
-    print_truth_chunk_detail(rows)
-    print_summary(rows)
-    print_judge_summary(rows, use_llm_judge)
+    # ── Print and simultaneously capture all sections for the text report ──
+    report_parts = []
+
+    def _run(fn, *args, **kwargs):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            fn(*args, **kwargs)
+        text = buf.getvalue()
+        print(text, end="")
+        report_parts.append(text)
+
+    _run(print_per_query_table,    rows)
+    _run(print_truth_chunk_detail, rows)
+    _run(print_summary,            rows)
+    _run(print_judge_summary,      rows, use_llm_judge)
 
     out_csv = eval_path.parent / eval_path.name.replace("eval_", "analysis_").replace(".json", ".csv")
+    out_txt = out_csv.with_suffix(".txt")
+
     pd.DataFrame(rows).to_csv(out_csv, index=False)
+    out_txt.write_text("".join(report_parts), encoding="utf-8")
+
     print(f"\nSaved → {out_csv}")
+    print(f"Saved → {out_txt}")
+
+
+# ── Main ─────────────────────────────────────────────────────────────────────
+
+def main():
+    """
+    CLI entry point. Parses flags, loads corpus and optionally Phi-4 once, then
+    delegates to run_analysis().
+
+    CLI flags:
+      positional arg  : path to eval JSON (default: EVAL_FILE constant)
+      --judge         : enable Phi-4 LLM judge
+    """
+    use_llm_judge = "--judge" in sys.argv
+    positional    = [a for a in sys.argv[1:] if not a.startswith("--")]
+    eval_path     = Path(positional[0]) if positional else EVAL_FILE
+
+    print(f"Corpus dir: {CHUNKS_DIR}")
+    corpus, fp_index = load_corpus()
+    print(f"  Loaded {len(corpus)} chunks from {corpus['source_file'].nunique()} PKL files")
+
+    judge_model, judge_tok = None, None
+    if use_llm_judge:
+        from mlx_lm import load as mlx_load
+        print("\nLoading Phi-4 judge model…")
+        judge_model, judge_tok = mlx_load("mlx-community/phi-4-4bit")
+
+    run_analysis(eval_path, corpus, fp_index, use_llm_judge, judge_model, judge_tok)
 
 
 if __name__ == "__main__":
-    main()
+    # ── Batch mode: define eval files to analyse in sequence ──────────────────
+    # Corpus and judge model are loaded ONCE and reused across all files.
+    # To run a single file interactively, pass it as a CLI arg instead:
+    #   python evaluation_run.py path/to/eval_YYYYMMDD_HHMM.json [--judge]
+
+    USE_LLM_JUDGE = False   # set True to enable Phi-4 judging for all runs
+
+    eval_files = [
+        # Path("/Users/nadavsmacbookair/Desktop/Thesis/data/eval_results/eval_20260626_1537.json"),
+    ]
+
+    if not eval_files:
+        # Fall back to CLI / EVAL_FILE constant when no batch list is defined
+        main()
+    else:
+        print(f"Corpus dir: {CHUNKS_DIR}")
+        corpus, fp_index = load_corpus()
+        print(f"  Loaded {len(corpus)} chunks from {corpus['source_file'].nunique()} PKL files")
+
+        judge_model, judge_tok = None, None
+        if USE_LLM_JUDGE:
+            from mlx_lm import load as mlx_load
+            print("\nLoading Phi-4 judge model…")
+            judge_model, judge_tok = mlx_load("mlx-community/phi-4-4bit")
+
+        for i, ef in enumerate(eval_files):
+            print(f"\n{'='*60}\nBatch {i+1}/{len(eval_files)}: {Path(ef).name}\n{'='*60}")
+            run_analysis(Path(ef), corpus, fp_index, USE_LLM_JUDGE, judge_model, judge_tok)

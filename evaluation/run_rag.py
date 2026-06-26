@@ -1,4 +1,5 @@
 #%%
+import subprocess
 from datetime import datetime
 from types import SimpleNamespace
 import pandas as pd
@@ -79,6 +80,7 @@ def run_evaluation(
     modes:      list    = None,   # any subset of ["dense", "sparse", "hybrid"]
     enhance_query_flag:  bool = False,
     use_tiered_years:    bool = True,  # proportional top_k per year when year is a list
+    notes = " " # add info to save.
 ) -> pd.DataFrame:
     if levels is None:
         levels = list(COLLECTIONS_2.keys())
@@ -226,17 +228,23 @@ def run_evaluation(
     print(f"\n── Evaluation complete ──")
     print(f"  Total: {len(results_df)} | Empty answers: {n_empty}")
 
-    results_df.to_csv(f"{output_dir}/eval_{ts}.csv",   index=False)
-    results_df.to_pickle(f"{output_dir}/eval_{ts}.pkl")
-    results_df.to_json(f"{output_dir}/eval_{ts}.json")
+    results_df.to_csv(f"{output_dir}/{notes}_eval_{ts}.csv",   index=False)
+    results_df.to_pickle(f"{output_dir}/{notes}eval_{ts}.pkl")
+    results_df.to_json(f"{output_dir}/{notes}eval_{ts}.json")
 
     print(f"  Saved → {output_dir}/eval_{ts}.{{csv,pkl,json}}")
     return results_df
 
 
-#%%
-if __name__ == "__main__":
-    tickers   = ["wmt"]
+def main(
+        tickers,
+        enhance_query_flag=True,
+        levels=["header"],
+        modes=["hybrid"],  # dense embedding computed once per query
+        use_tiered_years = True,
+        notes = "",
+):
+    tickers   = tickers
     finder_df = run_finder(tickers=tickers)
     print("Loading generation model...")
     gen_model, gen_tokenizer = load("mlx-community/Llama-3.2-3B-Instruct-4bit")
@@ -250,10 +258,42 @@ if __name__ == "__main__":
         embed_model=embed_model,
         embed_tokenizer=embed_tokenizer,
         top_k=6,
-        enhance_query_flag=True,
-        levels=["header"],
-        modes=["hybrid"],  # dense embedding computed once per query
+        enhance_query_flag=enhance_query_flag,
+        levels=levels,
+        modes=modes,  # dense embedding computed once per query
+        use_tiered_years = use_tiered_years,
+        notes = notes,
     )
     print(results)
 
-# %%
+#%%
+if __name__ == "__main__":
+    configs = [
+        dict(tickers=["tsla"], enhance_query_flag=True, levels=["header"], modes=["hybrid"], use_tiered_years=False, notes="TSLA-HYBRID_QUERY-ENHANCED"),
+        dict(tickers=["tsla"], enhance_query_flag=True, levels=["header"], modes=["hybrid"], use_tiered_years=True,  notes="TSLA-TIERED_YEARS-HYBRID_QUERY-ENHANCED"),
+        dict(tickers=["pypl"], enhance_query_flag=True, levels=["header"], modes=["hybrid"], use_tiered_years=False, notes="PYPL-HYBRID_QUERY-ENHANCED"),
+        dict(tickers=["pypl"], enhance_query_flag=True, levels=["header"], modes=["hybrid"], use_tiered_years=True,  notes="PYPL-TIERED_YEARS-HYBRID_QUERY-ENHANCED"),
+    ]
+
+    # Load models once — reloading per run would add ~2 min overhead each iteration
+    print("Loading generation model...")
+    gen_model, gen_tokenizer = load("mlx-community/Llama-3.2-3B-Instruct-4bit")
+    print("Loading embedding model...")
+    embed_model, embed_tokenizer = emb_load("mlx-community/embeddinggemma-300m-bf16")
+
+    for i, cfg in enumerate(configs):
+        print(f"\n{'='*60}\nRun {i+1}/{len(configs)}: {cfg['notes']}\n{'='*60}")
+        finder_df = run_finder(tickers=cfg["tickers"])
+        run_evaluation(
+            finder_df=finder_df,
+            gen_model=gen_model,
+            gen_tokenizer=gen_tokenizer,
+            embed_model=embed_model,
+            embed_tokenizer=embed_tokenizer,
+            top_k=6,
+            enhance_query_flag=cfg["enhance_query_flag"],
+            levels=cfg["levels"],
+            modes=cfg["modes"],
+            use_tiered_years=cfg["use_tiered_years"],
+            notes=cfg["notes"],
+        )
