@@ -11,7 +11,7 @@ from db.database import get_qdrant_client
 from mlx_lm import generate, load
 import mlx.core
 from mlx_embeddings.utils import load as emb_load
-from utils import parse_metadata_response
+from utils import parse_metadata_response, sanitize_year_extraction, extract_ticker_hint
 
 client = get_qdrant_client()
 #%%
@@ -31,13 +31,29 @@ VALID_MODES  = {"dense", "sparse", "hybrid"}
 
 
 def extract_metadata(query: str, model, tokenizer) -> dict:
+    ticker_hint = extract_ticker_hint(query)
+
+    user_content = query
+    if ticker_hint:
+        user_content = f"{query}\n[Ticker hint: {ticker_hint.upper()}]"
+
     messages = [
         {"role": "system", "content": META_EXTRACT_PROMPT},
-        {"role": "user",   "content": query},
+        {"role": "user",   "content": user_content},
     ]
     prompt   = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     response = generate(model, tokenizer, prompt=prompt, verbose=False)
-    return parse_metadata_response(response, fallback_query=query)
+    meta     = parse_metadata_response(response, fallback_query=query)
+
+    # Sanitize year: convert strings/shorthands to integer(s)
+    clean_year = sanitize_year_extraction(meta.get("year"), query=query)
+    meta["year"] = clean_year  # int, list[int], or None
+
+    # Fallback: use regex-extracted ticker if LLM returned nothing
+    if not meta.get("ticker") and ticker_hint:
+        meta["ticker"] = ticker_hint
+
+    return meta
 
 
 def enhance_query(query: str, model, tokenizer) -> str:
@@ -98,7 +114,7 @@ def run_evaluation(
         meta = extract_metadata(query, gen_model, gen_tokenizer)
         print(f"  ticker={meta['ticker']} year={meta['year']} form_type={meta['form_type']}")
 
-        filters = {k: meta[k] for k in ("ticker", "year", "form_type") if meta.get(k)}
+        filters = {k: meta[k] for k in ("ticker", "year", "form_type") if meta.get(k) is not None}
 
         # ── Dense embedding — computed ONCE per query, reused across levels and modes ──
         query_vec = None
