@@ -93,7 +93,7 @@ def search_bm25(coll_name_sparse, query_text, payload_must=None, top_k=5):
     query_filter = _build_filter(payload_must)
     results_ = client.query_points(
         collection_name=coll_name_sparse,
-        query=models.Document(text=query_text, model="qdrant/bm25"),
+        query=models.Document(text=query_text.lower(), model="qdrant/bm25"),
         using="bm25",
         limit=top_k,
         with_payload=True,

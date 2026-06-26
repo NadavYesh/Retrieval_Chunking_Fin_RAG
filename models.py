@@ -25,8 +25,12 @@ class doc_payload(pydantic.BaseModel):
     # level-3 enrichment
     description: Optional[str] = None  # LLM-generated summary; embed this instead of text
 
-    # Clean and normalize strings automatically
-    @pydantic.field_validator('form_type', 'company_name', 'ticker', 'section', 'subsection', 'item', mode="before")
+    # Normalize all string fields to lowercase
+    @pydantic.field_validator(
+        'form_type', 'company_name', 'ticker',
+        'section', 'subsection', 'item', 'description',
+        mode="before"
+    )
     @classmethod
     def lowercase_string(cls, v):
         if isinstance(v, str):

@@ -174,12 +174,12 @@ def upsert_data():
             for idx, (metadata, text, p_id, raw_txt) in enumerate(zip(batch_metadatas, batch_texts, batch_ids, batch_raw)):
                 try:
                     validated_payload = doc_payload(**metadata).model_dump()
-                    validated_payload["text"] = raw_txt 
+                    validated_payload["text"] = raw_txt.lower() if isinstance(raw_txt, str) else raw_txt
                     payload = validated_payload
                 except Exception as e:
                     print(f"    Warning: Metadata validation failed: {e}")
                     payload = metadata.copy()
-                    payload["text"] = texts[idx]
+                    payload["text"] = texts[idx].lower() if isinstance(texts[idx], str) else texts[idx]
                     
                 points.append(
                     PointStruct(

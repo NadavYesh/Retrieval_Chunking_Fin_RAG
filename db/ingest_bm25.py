@@ -83,12 +83,13 @@ def upsert_bm25_data():
                 except Exception as e:
                     print(f"  Metadata validation failed: {e}")
                     payload = dict(metadata)
-                payload["text"] = text
+                text_lower = text.lower() if isinstance(text, str) else text
+                payload["text"] = text_lower
 
                 points.append(
                     PointStruct(
                         id=p_id,
-                        vector={"bm25": models.Document(text=text, model="qdrant/bm25")},
+                        vector={"bm25": models.Document(text=text_lower, model="qdrant/bm25")},
                         payload=payload,
                     )
                 )
