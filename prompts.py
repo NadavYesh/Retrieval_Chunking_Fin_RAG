@@ -24,10 +24,17 @@ This system is frozen at early 2024. The most recent available 10-K filings are 
 - "last year", "prior year", "previous year", "previous fiscal year", "last fiscal year" → year = 2023
 - FY shorthand: FY21 = 2021, FY22 = 2022, FY23 = 2023, FY24 = 2024, FY25 = 2025 (add 2000 to 2-digit suffix)
 - Year ranges: "FY22-FY24" or "2022 to 2024" or "2022-2024" → expand to ALL years in the range: [2022, 2023, 2024]
-- "year" MUST always be an INTEGER or ARRAY of INTEGERs. NEVER return strings.
+- Comparative / trend language → return an ARRAY covering all relevant years:
+  "year-over-year", "YoY", "prior year trends", "compared to prior year" → [2023, 2024]
+  "prior fiscal years", "historical", "multi-year" → [2022, 2023, 2024]
+- "year" MUST always be an INTEGER or ARRAY of INTEGERs, or null. NEVER return strings.
   BAD: "year": "current fiscal year"   GOOD: "year": 2024
   BAD: "year": "FY23"                  GOOD: "year": 2023
   BAD: "year": "latest"                GOOD: "year": 2024
+- If no fiscal year is explicitly OR implicitly referenced, return null for year.
+  Do NOT default to 2024 for general questions with no temporal anchor.
+  BAD: "share repurchases impact on EPS" → "year": 2024
+  GOOD: "share repurchases impact on EPS" → "year": null
 
 ### Instructions:
 1. **Identify the Company**: The user might mention a company name instead of a ticker. You MUST return the stock TICKER SYMBOL in LOWERCASE — not the company name.

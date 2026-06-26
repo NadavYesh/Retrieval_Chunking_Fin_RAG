@@ -11,6 +11,7 @@ FINDER_ANCHOR_YEAR = 2024
 FINDER_PRIOR_YEAR  = 2023
 
 _RELATIVE_YEAR_MAP = {
+    # ── Single-year anchors ────────────────────────────────────────────────────
     "current fiscal year":   FINDER_ANCHOR_YEAR,
     "current fy":            FINDER_ANCHOR_YEAR,
     "current year":          FINDER_ANCHOR_YEAR,
@@ -25,6 +26,17 @@ _RELATIVE_YEAR_MAP = {
     "previous fiscal year":  FINDER_PRIOR_YEAR,
     "last fiscal year":      FINDER_PRIOR_YEAR,
     "prior fiscal year":     FINDER_PRIOR_YEAR,
+    # ── Multi-year phrases → list (2 years: anchor-1 + anchor) ────────────────
+    "year-over-year":        [FINDER_PRIOR_YEAR, FINDER_ANCHOR_YEAR],
+    "yoy":                   [FINDER_PRIOR_YEAR, FINDER_ANCHOR_YEAR],
+    "prior year trends":     [FINDER_PRIOR_YEAR, FINDER_ANCHOR_YEAR],
+    "prior year comparison": [FINDER_PRIOR_YEAR, FINDER_ANCHOR_YEAR],
+    "compared to prior":     [FINDER_PRIOR_YEAR, FINDER_ANCHOR_YEAR],
+    # ── Multi-year phrases → list (3 years: anchor-2..anchor) ─────────────────
+    "prior fiscal years":    [FINDER_ANCHOR_YEAR - 2, FINDER_PRIOR_YEAR, FINDER_ANCHOR_YEAR],
+    "prior years":           [FINDER_ANCHOR_YEAR - 2, FINDER_PRIOR_YEAR, FINDER_ANCHOR_YEAR],
+    "historical":            [FINDER_ANCHOR_YEAR - 2, FINDER_PRIOR_YEAR, FINDER_ANCHOR_YEAR],
+    "multi-year":            [FINDER_ANCHOR_YEAR - 2, FINDER_PRIOR_YEAR, FINDER_ANCHOR_YEAR],
 }
 
 

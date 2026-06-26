@@ -5,7 +5,10 @@ import pandas as pd
 from pathlib import Path
 import sys
 sys.path.append(str(Path(__file__).resolve().parent.parent))
-from search_engine import search_with_payload, search_bm25, rrf_fuse, generate_llm_answer
+from search_engine import (
+    search_with_payload, search_bm25, rrf_fuse, generate_llm_answer,
+    search_dense_tiered, search_bm25_tiered,
+)
 from prompts import META_EXTRACT_PROMPT, QUERY_ENHANCEMENT_PROMPT
 from FinDER import run_finder
 from db.database import get_qdrant_client
@@ -74,7 +77,8 @@ def run_evaluation(
     top_k:      int     = 5,
     levels:     list    = None,
     modes:      list    = None,   # any subset of ["dense", "sparse", "hybrid"]
-    enhance_query_flag: bool = False,
+    enhance_query_flag:  bool = False,
+    use_tiered_years:    bool = True,  # proportional top_k per year when year is a list
 ) -> pd.DataFrame:
     if levels is None:
         levels = list(COLLECTIONS_2.keys())
@@ -115,7 +119,14 @@ def run_evaluation(
         meta = extract_metadata(query, gen_model, gen_tokenizer)
         print(f"  ticker={meta['ticker']} year={meta['year']} form_type={meta['form_type']}")
 
-        filters = {k: meta[k] for k in ("ticker", "year", "form_type") if meta.get(k) is not None}
+        year_val   = meta.get("year")
+        # base_filters: ticker + form_type only — year handled separately for tiered retrieval
+        base_filters = {k: meta[k] for k in ("ticker", "form_type") if meta.get(k) is not None}
+        filters      = {**base_filters, "year": year_val} if year_val is not None else base_filters
+        # tiered = multi-year list AND the flag is on
+        is_tiered  = use_tiered_years and isinstance(year_val, list) and len(year_val) > 1
+        if is_tiered:
+            print(f"  [tiered] years={year_val} — using proportional top_k per year")
 
         # ── Dense embedding — computed ONCE per query, reused across levels and modes ──
         query_vec = None

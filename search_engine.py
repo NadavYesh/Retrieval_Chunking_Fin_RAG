@@ -124,6 +124,80 @@ def rrf_fuse(dense_results, sparse_results, k: int = 60, top_k: int = 6) -> list
     sorted_ids = sorted(scores, key=scores.__getitem__, reverse=True)[:top_k]
     return [point_map[pid] for pid in sorted_ids if pid in point_map]
 
+
+def rrf_fuse_multi(result_sets: list, k: int = 60, top_k: int = 6) -> list:
+    """
+    RRF fusion over N result sets (generalisation of rrf_fuse for tiered retrieval).
+    Each element may be a QueryResponse (has .points) or a plain list of ScoredPoints.
+    """
+    scores: dict = {}
+    point_map: dict = {}
+    for result_set in result_sets:
+        pts = result_set.points if hasattr(result_set, "points") else (result_set or [])
+        for rank, p in enumerate(pts):
+            scores[p.id] = scores.get(p.id, 0.0) + 1.0 / (k + rank + 1)
+            point_map.setdefault(p.id, p)
+    sorted_ids = sorted(scores, key=scores.__getitem__, reverse=True)[:top_k]
+    return [point_map[pid] for pid in sorted_ids if pid in point_map]
+
+
+def _year_weights(years: list[int]) -> list[tuple[int, float]]:
+    """
+    Assign retrieval budget weights to years using exponential decay by recency.
+    Most recent year gets the largest share of the prefetch budget.
+
+    Examples:
+      [2024]             → [(2024, 1.00)]
+      [2023, 2024]       → [(2024, 0.67), (2023, 0.33)]
+      [2022, 2023, 2024] → [(2024, 0.57), (2023, 0.29), (2022, 0.14)]
+    """
+    if not years:
+        return []
+    sorted_years = sorted(years, reverse=True)  # newest first
+    n = len(sorted_years)
+    raw = [2 ** (n - 1 - i) for i in range(n)]
+    total = sum(raw)
+    return [(yr, r / total) for yr, r in zip(sorted_years, raw)]
+
+
+def search_dense_tiered(coll_name, query_vec, base_filters, years, prefetch_k):
+    """
+    Dense retrieval across multiple years with recency-weighted top_k budgets.
+    Runs one search per year, RRF-fuses all results into a single QueryResponse-like object.
+
+    base_filters : payload_must dict WITHOUT a year key
+    years        : list of ints (all years to query across)
+    prefetch_k   : total candidate budget; distributed proportionally across years
+    """
+    from types import SimpleNamespace
+    year_wts = _year_weights(years)
+    result_sets = []
+    for yr, w in year_wts:
+        k_i = max(1, round(prefetch_k * w))
+        yr_filters = {**base_filters, "year": yr}
+        res = search_with_payload(coll_name, query_vec, payload_must=yr_filters, top_k=k_i)
+        result_sets.append(res)
+    fused = rrf_fuse_multi(result_sets, top_k=prefetch_k)
+    return SimpleNamespace(points=fused)
+
+
+def search_bm25_tiered(coll_name_sparse, query_text, base_filters, years, prefetch_k):
+    """
+    BM25 retrieval across multiple years with recency-weighted top_k budgets.
+    Mirrors search_dense_tiered for the sparse collection.
+    """
+    from types import SimpleNamespace
+    year_wts = _year_weights(years)
+    result_sets = []
+    for yr, w in year_wts:
+        k_i = max(1, round(prefetch_k * w))
+        yr_filters = {**base_filters, "year": yr}
+        res = search_bm25(coll_name_sparse, query_text, payload_must=yr_filters, top_k=k_i)
+        result_sets.append(res)
+    fused = rrf_fuse_multi(result_sets, top_k=prefetch_k)
+    return SimpleNamespace(points=fused)
+
+
 def get_all_chunks_for_payload(coll_name, payload_must=None):
     """
     Retrieves all chunks matching the payload filter using scroll.
