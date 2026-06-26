@@ -18,14 +18,37 @@ RAG_ANSWER_PROMPT = '''
 META_EXTRACT_PROMPT = """
 You are a financial analysis expert specializing in SEC 10-K filings. Your task is to transform a user's natural language request into a structured search object.
 
+### Temporal Context (READ CAREFULLY):
+This system is frozen at early 2024. The most recent available 10-K filings are for fiscal year 2024 and fiscal year 2023. Apply these rules strictly:
+- "latest", "recent", "current", "this year", "current fiscal year", "current FY" → year = 2024
+- "last year", "prior year", "previous year", "previous fiscal year", "last fiscal year" → year = 2023
+- FY shorthand: FY21 = 2021, FY22 = 2022, FY23 = 2023, FY24 = 2024, FY25 = 2025 (add 2000 to 2-digit suffix)
+- Year ranges: "FY22-FY24" or "2022 to 2024" or "2022-2024" → expand to ALL years in the range: [2022, 2023, 2024]
+- "year" MUST always be an INTEGER or ARRAY of INTEGERs. NEVER return strings.
+  BAD: "year": "current fiscal year"   GOOD: "year": 2024
+  BAD: "year": "FY23"                  GOOD: "year": 2023
+  BAD: "year": "latest"                GOOD: "year": 2024
+
 ### Instructions:
-1. **Identify the Company**: The user might mention a company name instead of a ticker. You MUST identify the correct stock ticker symbol in LOWERCASE (e.g., "Apple" -> "aapl", "Microsoft" -> "msft", "3M" -> "mmm").
-2. **Handle Fiscal Year**: The user could mention a year of interest. Extract fiscal years of interest. Use an array if multiple years are specified.
+1. **Identify the Company**: The user might mention a company name instead of a ticker. You MUST return the stock TICKER SYMBOL in LOWERCASE — not the company name.
+   - NVIDIA / Nvidia → "nvda"
+   - Tesla → "tsla"
+   - Walmart → "wmt"
+   - PayPal → "pypl"
+   - Apple → "aapl"
+   - Microsoft → "msft"
+   - Amazon → "amzn"
+   - Alphabet / Google → "googl"
+   - Meta / Facebook → "meta"
+   - 3M → "mmm"
+   - "ticker" at the end of a query is a placeholder — identify the company from the rest of the query text and return its ticker symbol.
+   - If you cannot identify the ticker with confidence, return null.
+2. **Handle Fiscal Year**: Apply the Temporal Context rules above. Extract all relevant fiscal years. Use an array for multiple years.
 3. **optimized_prompt**: Rewrite the user's request into a high-density financial query. Use professional terminology like 'amortization', 'revenue recognition', 'liquidity risk', 'EBITDA', 'segment reporting', and 'capital expenditures' to help a vector database find the most relevant chunks of text.
 4. **payload**:
    - "form_type": Always "10-k".
-   - "ticker": The stock ticker symbol in LOWERCASE.
-   - "year": The fiscal year(s) as an INTEGER or an ARRAY of INTEGERs.
+   - "ticker": The stock ticker symbol in LOWERCASE (not the company name).
+   - "year": The fiscal year(s) as an INTEGER or an ARRAY of INTEGERs — never a string.
 
 Return ONLY a valid JSON object.
 """
@@ -83,6 +106,8 @@ Guidelines:
 4. Keep the enhanced query focused and concise — do NOT add speculative content unrelated to the original intent.
 5. Preserve any company names, tickers, or fiscal years present in the original query.
 6. Output ONLY the enhanced query text, nothing else.
+7. Resolve temporal shorthands: "current" / "latest" / "most recent" → "fiscal year 2024"; "prior year" / "last year" → "fiscal year 2023". Expand FY22/FY23/FY24 shorthand to their full 4-digit equivalents (FY22 → 2022, FY23 → 2023, FY24 → 2024).
+8. For multi-year trend queries (e.g., "FY22-FY24"), list all years explicitly so the embedding can match documents across all relevant fiscal years.
 
 Original query: {query}
 Enhanced query:\

@@ -1,9 +1,10 @@
 #%%
 from datetime import datetime
-from pathlib import Path
 from types import SimpleNamespace
 import pandas as pd
-
+from pathlib import Path
+import sys
+sys.path.append(str(Path(__file__).resolve().parent.parent))
 from search_engine import search_with_payload, search_bm25, rrf_fuse, generate_llm_answer
 from prompts import META_EXTRACT_PROMPT, QUERY_ENHANCEMENT_PROMPT
 from FinDER import run_finder
@@ -50,7 +51,7 @@ def extract_metadata(query: str, model, tokenizer) -> dict:
     meta["year"] = clean_year  # int, list[int], or None
 
     # Fallback: use regex-extracted ticker if LLM returned nothing
-    if not meta.get("ticker") and ticker_hint:
+    if not meta.get("ticker") and ticker_hint: # if any is falsey
         meta["ticker"] = ticker_hint
 
     return meta
@@ -224,7 +225,7 @@ def run_evaluation(
 
 #%%
 if __name__ == "__main__":
-    tickers   = ["nvda"]#,"wmt","tsla","pypl"]
+    tickers   = ["wmt"]
     finder_df = run_finder(tickers=tickers)
     print("Loading generation model...")
     gen_model, gen_tokenizer = load("mlx-community/Llama-3.2-3B-Instruct-4bit")

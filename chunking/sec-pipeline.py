@@ -6,7 +6,8 @@ import uuid
 import pandas as pd
 import pickle
 import tiktoken
-# from prompts import ENRICH_CHUNKS_PROMPT need to fix path
+sys.path.insert(0, str(Path(__file__).parent))
+from prompts import ENRICH_CHUNKS_PROMPT 
 from metadata_extractor import get_meta_sec, sec_metadata
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from sec_processing import sec_to_mk, sec_splitter_headers, enrich_md_text, inject_header_placeholders, chunk_document
@@ -247,9 +248,9 @@ if __name__ == "__main__":
     RUN_ENRICHED = False
     caption_ = None
     if RUN_ENRICHED:
-        from mlx_lm import load as mlx_load
-        print("Loading phi-4-4bit...")
-        caption_ = mlx_load("mlx-community/Phi-4-mini-instruct-4bit")
+        from mlx_lm import load
+        print("Loading Llama...")
+        caption_ = load("mlx-community/Llama-3.2-3B-Instruct-4bit")
 
     for (path, name) in zip(path_names, RAW_FILES):
         name        = name[:-5]
