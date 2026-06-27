@@ -5,9 +5,12 @@ import pandas as pd
 import re
 def filter_FinDER(df, strings_to_filter):
     # Using word boundaries (\b) ensures we match the ticker as a standalone word.
-    fltr_trms = "|".join([fr"\b{re.escape(t.strip())}\b" for t in strings_to_filter])
-    filt_cond = df["query"].str.contains(fltr_trms, case=False, na=False)
-    return df[filt_cond]
+    fltr_trms_txt = "|".join([fr"\b{re.escape(t.strip())}\b" for t in strings_to_filter])
+    filt_cond_txt = df["query"].str.contains(fltr_trms_txt, case=False, na=False)
+    # remove entries were references are none (we test 10-k knowledge)
+    fltr_ref_txt = f"\b(none|n?a|no)\b"
+    filt_cond_ref = not df["truth_ref"].str.contains(fltr_ref_txt,case=False,na=False)
+    return df[filt_cond_txt]
 
 
 
