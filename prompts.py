@@ -99,25 +99,40 @@ After your brief rationale (2–4 sentences), output your decisions strictly in 
 {answer_a}
 """
 
-# Used in eval_new.py → enhance_query() when enhance_query_flag=True
+# Used in evaluation/run_rag.py → enhance_query() when enhance_query_flag=True
 # Rewrites a short/shorthand user query into a richer semantic search query for RAG retrieval.
+# NOTE: used as the SYSTEM message; the raw query is passed as the USER message.
 QUERY_ENHANCEMENT_PROMPT = """\
-You are a text rewriting engine for a document retrieval system. Your only function is mechanical text transformation — you do not give advice, opinions, or analysis of any kind.
-
-Task: rewrite the INPUT TEXT below into an expanded version that maximises retrieval recall in a corpus of SEC 10-K filings.
+You are a mechanical text-transformation engine for a document retrieval system. \
+You expand terse financial queries into richer search strings. \
+You do NOT give advice, opinions, or analysis — you only rewrite text.
 
 Rules:
-1. Expand abbreviations using SEC/financial terminology (e.g. "rev" → "revenue", "opt" → "operating income / operations", "capex" → "capital expenditures", "D&A" → "depreciation and amortization", "FCF" → "free cash flow", "EPS" → "earnings per share").
-2. Add financial synonyms likely to appear in 10-K text (e.g. "profit" → also include "net income", "operating income", "gross margin").
-3. Use formal SEC filing language throughout.
+1. Expand abbreviations: "rev" → "revenue", "opt" → "operating income", "capex" → "capital expenditures", "D&A" → "depreciation and amortization", "FCF" → "free cash flow", "EPS" → "earnings per share", "mkt cap" → "market capitalization".
+2. Add financial synonyms likely to appear in 10-K filings (e.g. "profit" → include "net income", "operating income", "gross margin").
+3. Use formal SEC annual-report language throughout.
 4. Keep the output focused — do not add content unrelated to the original meaning.
-5. Preserve all company names, tickers, and fiscal years.
+5. Preserve all company names, tickers, and fiscal years exactly as given.
 6. Resolve temporal shorthands: "current"/"latest"/"most recent" → "fiscal year 2024"; "prior year"/"last year" → "fiscal year 2023"; FY22/FY23/FY24 → 2022/2023/2024.
 7. For multi-year queries, list every year explicitly.
-8. CRITICAL: Output ONLY the rewritten text. Do NOT include disclaimers, refusals, apologies, or any commentary — any such output breaks the retrieval system.
+8. Output ONLY the rewritten query text — no labels, no explanation, no disclaimers.
 
-INPUT TEXT: {query}
-REWRITTEN TEXT:\
+Examples of correct transformations:
+
+INPUT: AAPL rev FY23
+OUTPUT: Apple Inc. fiscal year 2023 net revenue, total net sales, revenue recognition, revenue by reportable segment, annual revenue.
+
+INPUT: TSLA capex latest year
+OUTPUT: Tesla Inc. fiscal year 2024 capital expenditures, property plant and equipment additions, infrastructure investment, manufacturing expansion, capital allocation.
+
+INPUT: AMZN risk factors FY22
+OUTPUT: Amazon.com Inc. fiscal year 2022 risk factors, business risks, operational risks, regulatory and legal risks, cybersecurity risks, competitive risks, macroeconomic risk disclosures in annual report on Form 10-K.
+
+INPUT: NVDA EPS YoY
+OUTPUT: NVIDIA Corporation earnings per share fiscal year 2023 and fiscal year 2024 year-over-year comparison, diluted earnings per share, basic EPS, net income attributable to common stockholders.
+
+INPUT: TSLA legal proceedings FY23
+OUTPUT: Tesla Inc. fiscal year 2023 legal proceedings, pending litigation, regulatory investigations, government inquiries, contingent liabilities, commitments and contingencies disclosed in annual report.\
 """
 
 # ─────────────────────────────────────────────────────────────────────────────

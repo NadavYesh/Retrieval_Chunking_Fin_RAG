@@ -66,17 +66,24 @@ def extract_metadata(query: str, model, tokenizer) -> dict:
 
 
 _REFUSAL_RE = re.compile(
-    r"^(i (can'?t|cannot|am unable|won'?t)|sorry[,. ]|i'?m sorry)",
+    r"i (can'?t|cannot|am unable|won'?t|must decline|'?m not able)|"
+    r"i'?m sorry|^sorry[,. ]|"
+    r"this (request|query|question) (is|involves|relates to)|"
+    r"as an? (ai|language model|assistant)[,. ]",
     re.IGNORECASE,
 )
 
 def _refusal_fallback(raw: str, original: str) -> str:
     """Return the usable rewrite; fall back to original if the model refused."""
-    # זה יעזור לי להבין למה תמיד קורה הפולבאק.
-    if not _REFUSAL_RE.match(raw.strip()):
+    m = _REFUSAL_RE.search(raw)
+    if m is None:
         return raw.strip()
-    # Salvage: take whatever follows a transition phrase like "as requested" / "however"
-    parts = re.split(r"(?:as requested[,.]?|however[,.]?)\s*", raw, flags=re.IGNORECASE)
+    # Try to salvage text before the refusal phrase
+    before = raw[:m.start()].strip()
+    if len(before) > 20:
+        return before
+    # Try transition phrases after the refusal
+    parts = re.split(r"(?:as requested[,.]?|however[,.]?|here is[,:]?)\s*", raw, flags=re.IGNORECASE)
     candidate = parts[-1].strip() if len(parts) > 1 else ""
     orig_tokens = set(original.lower().split())
     if candidate and any(tok in candidate.lower() for tok in orig_tokens):
@@ -88,17 +95,20 @@ def _refusal_fallback(raw: str, original: str) -> str:
 MAX_ENHANCE_RETRIES = 3
 
 def enhance_query(query: str, model, tokenizer) -> str:
-    prompt    = QUERY_ENHANCEMENT_PROMPT.format(query=query)
-    messages  = [{"role": "user", "content": prompt}]
+    messages  = [
+        {"role": "system", "content": QUERY_ENHANCEMENT_PROMPT},
+        {"role": "user",   "content": query},
+    ]
     formatted = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
 
     for attempt in range(1, MAX_ENHANCE_RETRIES + 1):
-        raw = generate(model, tokenizer, prompt=formatted, verbose=False, max_tokens=300)
+        print(f"The raw user query is {query}" )
+        enhanced_raw = generate(model, tokenizer, prompt=formatted, verbose=False, max_tokens=300)
         gc.collect()
         mx.clear_cache()
-        print(f"  [enhance attempt {attempt}] {len(raw)} chars: {repr(raw[:80])}")
-        if raw.strip():
-            return _refusal_fallback(raw, query)
+        print(f"  [enhance attempt {attempt} result:] {len(enhanced_raw)} chars: {repr(enhanced_raw[:80])}")
+        if enhanced_raw.strip():
+            return _refusal_fallback(enhanced_raw, query)
         print(f"  [enhance attempt {attempt}] empty output — retrying")
 
     print(f"  [ERROR] enhance_query: empty output after {MAX_ENHANCE_RETRIES} attempts — falling back to original query")
@@ -286,6 +296,7 @@ def run_evaluation(
     results_df.to_json(f"{output_dir}/{tag}_eval_{ts}.json")
 
     print(f"  Saved → {output_dir}/{tag}_eval_{ts}.{{csv,pkl,json}}")
+    client.close()
     return results_df
 
 
@@ -549,27 +560,27 @@ def main(
     print(results)
 
 #%%
-if __name__ == "__main__":
-    configs = [
-        dict(tickers=["tsla"], enhance_query_flag=True, levels=["header"], modes=["hybrid"], use_tiered_years=False),
-        dict(tickers=["tsla"], enhance_query_flag=True, levels=["header"], modes=["hybrid"], use_tiered_years=True),
-        dict(tickers=["tsla"], enhance_query_flag=False, levels=["header"], modes=["hybrid"], use_tiered_years=True),
-        dict(tickers=["tsla"], enhance_query_flag=False, levels=["header"], modes=["hybrid"], use_tiered_years=False),
-        # dict(tickers=["pypl"], enhance_query_flag=True,  levels=["header"], modes=["hybrid"], use_tiered_years=True),
-        # dict(tickers=["nvda"], enhance_query_flag=True,  levels=["header"], modes=["hybrid"], use_tiered_years=True),
-    ]
+# if __name__ == "__main__":
+#     configs = [
+#         dict(tickers=["tsla"], enhance_query_flag=True, levels=["header"], modes=["hybrid"], use_tiered_years=False),
+#         dict(tickers=["tsla"], enhance_query_flag=True, levels=["header"], modes=["hybrid"], use_tiered_years=True),
+#         dict(tickers=["tsla"], enhance_query_flag=False, levels=["header"], modes=["hybrid"], use_tiered_years=True),
+#         dict(tickers=["tsla"], enhance_query_flag=False, levels=["header"], modes=["hybrid"], use_tiered_years=False),
+#         # dict(tickers=["pypl"], enhance_query_flag=True,  levels=["header"], modes=["hybrid"], use_tiered_years=True),
+#         # dict(tickers=["nvda"], enhance_query_flag=True,  levels=["header"], modes=["hybrid"], use_tiered_years=True),
+#     ]
 
-    # Load models once — reloading per run would add ~2 min overhead each iteration
-    print("Loading generation model...")
-    gen_model, gen_tokenizer = load("mlx-community/Llama-3.2-3B-Instruct-4bit")
-    print("Loading embedding model...")
-    embed_model, embed_tokenizer = emb_load("mlx-community/embeddinggemma-300m-bf16")
+#     # Load models once — reloading per run would add ~2 min overhead each iteration
+#     print("Loading generation model...")
+#     gen_model, gen_tokenizer = load("mlx-community/Llama-3.2-3B-Instruct-4bit")
+#     print("Loading embedding model...")
+#     embed_model, embed_tokenizer = emb_load("mlx-community/embeddinggemma-300m-bf16")
 
-    run_multi_evaluation(
-        configs=configs,
-        gen_model=gen_model,
-        gen_tokenizer=gen_tokenizer,
-        embed_model=embed_model,
-        embed_tokenizer=embed_tokenizer,
-        top_k=6,
-    )
+#     run_multi_evaluation(
+#         configs=configs,
+#         gen_model=gen_model,
+#         gen_tokenizer=gen_tokenizer,
+#         embed_model=embed_model,
+#         embed_tokenizer=embed_tokenizer,
+#         top_k=6,
+#     )
