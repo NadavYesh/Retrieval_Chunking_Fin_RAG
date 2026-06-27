@@ -624,6 +624,7 @@ def judge_llm(question: str, truth_answer: str, rag_answer: str, model, tokenize
     Returns llm_relevance, llm_completeness (YES/NO strings), and llm_response (full
     raw model output for inspection).
     """
+    sys.path.append(str(Path(__file__).resolve().parent.parent))
     from prompts import JUDGE_PROMPT
     from mlx_lm import generate
 
@@ -754,29 +755,34 @@ def run_analysis(
             sys.stdout.flush()
         print()
 
-    # ── Print and simultaneously capture all sections for the text report ──
-    report_parts = []
+    # ── Print full detail to stdout, capture only summary sections for txt ──
+    print_per_query_table(rows)
+    print_truth_chunk_detail(rows)
 
-    def _run(fn, *args, **kwargs):
+    summary_parts = []
+
+    def _capture(fn, *args, **kwargs):
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             fn(*args, **kwargs)
         text = buf.getvalue()
         print(text, end="")
-        report_parts.append(text)
+        summary_parts.append(text)
 
-    _run(print_per_query_table,    rows)
-    _run(print_truth_chunk_detail, rows)
-    _run(print_summary,            rows)
-    _run(print_judge_summary,      rows, use_llm_judge)
+    _capture(print_summary,      rows)
+    _capture(print_judge_summary, rows, use_llm_judge)
 
     out_xlsx = eval_path.parent / "analysis" / eval_path.name.replace("eval_", "analysis_").replace(".json", ".xlsx")
-    out_txt = out_xlsx.with_suffix(".txt")
+    out_txt  = out_xlsx.with_suffix(".txt")
+    out_pkl  = out_xlsx.with_suffix(".pkl")
 
-    pd.DataFrame(rows).to_excel(out_xlsx, index=False)
-    out_txt.write_text("".join(report_parts), encoding="utf-8")
+    rows_df = pd.DataFrame(rows)
+    rows_df.to_excel(out_xlsx, index=False)
+    rows_df.to_pickle(out_pkl)
+    out_txt.write_text("".join(summary_parts), encoding="utf-8")
 
     print(f"\nSaved → {out_xlsx}")
+    print(f"Saved → {out_pkl}")
     print(f"Saved → {out_txt}")
 
 
@@ -814,11 +820,11 @@ if __name__ == "__main__":
     # To run a single file interactively, pass it as a CLI arg instead:
     #   python evaluation_run.py path/to/eval_YYYYMMDD_HHMM.json [--judge]
 
-    USE_LLM_JUDGE = False   # set True to enable Phi-4 judging for all runs
+    USE_LLM_JUDGE = True   # set True to enable Phi-4 judging for all runs
 
     eval_files = [
-        "/Users/nadavsmacbookair/Desktop/Thesis/data/eval_results/TSLA_HEADER_HYBRID_PLAIN_TIERED_eval_20260627_1201.json",
-        "/Users/nadavsmacbookair/Desktop/Thesis/data/eval_results/TSLA_HEADER_HYBRID_ENHANCED_TIERED_eval_20260627_1208.json"
+        "/Users/nadavsmacbookair/Desktop/Thesis/data/eval_results/TSLA_HEADER_HYBRID_ENHANCED_TIERED_eval_20260627_2216.json",
+        "/Users/nadavsmacbookair/Desktop/Thesis/data/eval_results/TSLA_HEADER_HYBRID_PLAIN_TIERED_eval_20260627_2216.json"
 
     ]
 

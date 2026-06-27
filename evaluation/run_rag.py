@@ -102,7 +102,7 @@ def enhance_query(query: str, model, tokenizer) -> str:
     formatted = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
 
     for attempt in range(1, MAX_ENHANCE_RETRIES + 1):
-        print(f"The raw user query is {query}" )
+        print(f"*****************************\n\nThe raw user query is {query}" )
         enhanced_raw = generate(model, tokenizer, prompt=formatted, verbose=False, max_tokens=300)
         gc.collect()
         mx.clear_cache()
@@ -157,13 +157,16 @@ def run_evaluation(
 
     for q_idx, (_, row) in enumerate(finder_df.iterrows()):
         finder_id    = row.get("_id", "")
-        query        = row.get("query", "")
+        orig_query   = row.get("query", "")
         truth_answer = row.get("truth_answer", "")
         truth_ref    = row.get("truth_ref", "")
-        print(f"\n[Q {q_idx+1}/{len(finder_df)}] {query[:80]}...")
+        print(f"\n[Q {q_idx+1}/{len(finder_df)}] {orig_query[:80]}...")
+        query         = orig_query
+        query_enhanced = None
         if enhance_query_flag:
-            query = enhance_query(query, gen_model, gen_tokenizer)
-            print(f"  [enhance] → {query[:120]}...")
+            query_enhanced = enhance_query(orig_query, gen_model, gen_tokenizer)
+            query          = query_enhanced
+            print(f"  [enhance] → {query_enhanced[:120]}...")
 
         meta = extract_metadata(query, gen_model, gen_tokenizer)
         print(f"  ticker={meta['ticker']} year={meta['year']} form_type={meta['form_type']}")
@@ -265,15 +268,16 @@ def run_evaluation(
                 )
 
                 results_list.append({
-                    "finder_id":     finder_id,
-                    "run_id":        run_id,
-                    "level":         level,
-                    "mode":          mode,
-                    "query":         query,
-                    "truth_answer":  truth_answer,
-                    "truth_ref":     truth_ref,
-                    "rag_answer":    rag_answer,
-                    "rag_retrieved": rag_ret,
+                    "finder_id":      finder_id,
+                    "run_id":         run_id,
+                    "level":          level,
+                    "mode":           mode,
+                    "query":          orig_query,
+                    "query_enhanced": query_enhanced,
+                    "truth_answer":   truth_answer,
+                    "truth_ref":      truth_ref,
+                    "rag_answer":     rag_answer,
+                    "rag_retrieved":  rag_ret,
                 })
 
     Path(output_dir).mkdir(parents=True, exist_ok=True)
@@ -291,11 +295,9 @@ def run_evaluation(
     print(f"\n── Evaluation complete ──")
     print(f"  Total: {len(results_df)} | Empty answers: {n_empty}")
 
-    results_df.to_csv(f"{output_dir}/{tag}_eval_{ts}.csv",   index=False)
-    results_df.to_pickle(f"{output_dir}/{tag}_eval_{ts}.pkl")
     results_df.to_json(f"{output_dir}/{tag}_eval_{ts}.json")
 
-    print(f"  Saved → {output_dir}/{tag}_eval_{ts}.{{csv,pkl,json}}")
+    print(f"  Saved → {output_dir}/{tag}_eval_{ts}.json")
     client.close()
     return results_df
 
@@ -500,15 +502,16 @@ def run_multi_evaluation(
                             for p_n, p in enumerate(context_points)
                         )
                         result_lists[cfg_idx].append({
-                            "finder_id":     finder_id,
-                            "run_id":        run_id,
-                            "level":         level,
-                            "mode":          mode,
-                            "query":         qt,
-                            "truth_answer":  truth_answer,
-                            "truth_ref":     truth_ref,
-                            "rag_answer":    rag_answer,
-                            "rag_retrieved": rag_ret,
+                            "finder_id":      finder_id,
+                            "run_id":         run_id,
+                            "level":          level,
+                            "mode":           mode,
+                            "query":          orig_query,
+                            "query_enhanced": enh_query if cfg["enhance_query_flag"] else None,
+                            "truth_answer":   truth_answer,
+                            "truth_ref":      truth_ref,
+                            "rag_answer":     rag_answer,
+                            "rag_retrieved":  rag_ret,
                         })
 
         # ── Save one file per config ──────────────────────────────────────────
@@ -524,10 +527,8 @@ def run_multi_evaluation(
             tag         = f"{tickers_tag}_{levels_tag}_{modes_tag}_{enh_tag}_{yr_tag}"
             n_empty     = (results_df["rag_answer"] == "No relevant context retrieved.").sum()
             print(f"\n  [cfg {cfg_idx}] {tag}: {len(results_df)} rows | {n_empty} empty")
-            results_df.to_csv(f"{output_dir}/{tag}_eval_{ts}.csv",   index=False)
-            results_df.to_pickle(f"{output_dir}/{tag}_eval_{ts}.pkl")
             results_df.to_json(f"{output_dir}/{tag}_eval_{ts}.json")
-            print(f"  Saved → {output_dir}/{tag}_eval_{ts}.{{csv,pkl,json}}")
+            print(f"  Saved → {output_dir}/{tag}_eval_{ts}.json")
 
 
 def main(
@@ -560,27 +561,27 @@ def main(
     print(results)
 
 #%%
-# if __name__ == "__main__":
-#     configs = [
-#         dict(tickers=["tsla"], enhance_query_flag=True, levels=["header"], modes=["hybrid"], use_tiered_years=False),
-#         dict(tickers=["tsla"], enhance_query_flag=True, levels=["header"], modes=["hybrid"], use_tiered_years=True),
-#         dict(tickers=["tsla"], enhance_query_flag=False, levels=["header"], modes=["hybrid"], use_tiered_years=True),
-#         dict(tickers=["tsla"], enhance_query_flag=False, levels=["header"], modes=["hybrid"], use_tiered_years=False),
-#         # dict(tickers=["pypl"], enhance_query_flag=True,  levels=["header"], modes=["hybrid"], use_tiered_years=True),
-#         # dict(tickers=["nvda"], enhance_query_flag=True,  levels=["header"], modes=["hybrid"], use_tiered_years=True),
-#     ]
+if __name__ == "__main__":
+    configs = [
+        dict(tickers=["wmt"], enhance_query_flag=True, levels=["header"], modes=["hybrid"], use_tiered_years=False),
+        dict(tickers=["wmt"], enhance_query_flag=True, levels=["header"], modes=["hybrid"], use_tiered_years=True),
+        dict(tickers=["wmt"], enhance_query_flag=False, levels=["header"], modes=["hybrid"], use_tiered_years=True),
+        dict(tickers=["wmt"], enhance_query_flag=False, levels=["header"], modes=["hybrid"], use_tiered_years=False),
+        # dict(tickers=["pypl"], enhance_query_flag=True,  levels=["header"], modes=["hybrid"], use_tiered_years=True),
+        # dict(tickers=["nvda"], enhance_query_flag=True,  levels=["header"], modes=["hybrid"], use_tiered_years=True),
+    ]
 
-#     # Load models once — reloading per run would add ~2 min overhead each iteration
-#     print("Loading generation model...")
-#     gen_model, gen_tokenizer = load("mlx-community/Llama-3.2-3B-Instruct-4bit")
-#     print("Loading embedding model...")
-#     embed_model, embed_tokenizer = emb_load("mlx-community/embeddinggemma-300m-bf16")
+    # Load models once — reloading per run would add ~2 min overhead each iteration
+    print("Loading generation model...")
+    gen_model, gen_tokenizer = load("mlx-community/Llama-3.2-3B-Instruct-4bit")
+    print("Loading embedding model...")
+    embed_model, embed_tokenizer = emb_load("mlx-community/embeddinggemma-300m-bf16")
 
-#     run_multi_evaluation(
-#         configs=configs,
-#         gen_model=gen_model,
-#         gen_tokenizer=gen_tokenizer,
-#         embed_model=embed_model,
-#         embed_tokenizer=embed_tokenizer,
-#         top_k=6,
-#     )
+    run_multi_evaluation(
+        configs=configs,
+        gen_model=gen_model,
+        gen_tokenizer=gen_tokenizer,
+        embed_model=embed_model,
+        embed_tokenizer=embed_tokenizer,
+        top_k=6,
+    )

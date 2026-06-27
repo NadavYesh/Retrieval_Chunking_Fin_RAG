@@ -15,9 +15,17 @@ def filter_FinDER(df, strings_to_filter):
 
 
 def run_finder(tickers):
-    # companies = ["pypl","paypal"]
     df = pd.read_parquet("/Users/nadavsmacbookair/Desktop/Thesis/data/FinDER/train.parquet")
     df = df.rename(columns={"text": "query", "answer": "truth_answer", "references": "truth_ref"})
+    def _has_real_refs(x):
+        if x is None:
+            return False
+        refs = [x] if isinstance(x, str) else list(x)
+        if not refs:
+            return False
+        return any(str(r).strip().lower() not in ("none", "none.", "") for r in refs)
+
+    df = df[df["truth_ref"].apply(_has_real_refs)]
     return filter_FinDER(df, tickers)
 
 # %%
