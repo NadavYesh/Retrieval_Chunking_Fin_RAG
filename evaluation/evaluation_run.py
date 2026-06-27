@@ -29,6 +29,7 @@ import re
 import sys
 from difflib import SequenceMatcher
 from pathlib import Path
+import openpyxl
 
 import numpy as np
 import pandas as pd
@@ -37,8 +38,9 @@ sys.path.insert(0, str(Path(__file__).parent))
 from evaluation_functions import score_row
 
 # ── Config ────────────────────────────────────────────────────────────────────
+# disabled because we run in batches.
+# EVAL_FILE  = Path("/Users/nadavsmacbookair/Desktop/Thesis/data/eval_results/WMT_eval_20260626_1603.json")
 
-EVAL_FILE  = Path("/Users/nadavsmacbookair/Desktop/Thesis/data/eval_results/WMT_eval_20260626_1603.json")
 CHUNKS_DIR = Path("/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/chunks/hierarchical/indexed-at-26-06-26/header")
 
 LOW_SCORE_THRESH = 0.60   # cosine similarity threshold — only meaningful for dense mode
@@ -237,6 +239,7 @@ def analyze_entry(idx: str, data: dict, corpus: pd.DataFrame, fp_index: dict) ->
                                        LOW_SCORE (dense only), SCORE_GAP_SMALL (dense only),
                                        TRUTH_NOT_IN_CORPUS, TRUTH_NOT_RETRIEVED
     """
+    finder_id     = data.get("finder_id",    {}).get(idx, "")
     run_id        = data["run_id"].get(idx, "")
     query         = data["query"].get(idx, "")
     truth_refs    = data["truth_ref"].get(idx, [])
@@ -321,6 +324,7 @@ def analyze_entry(idx: str, data: dict, corpus: pd.DataFrame, fp_index: dict) ->
         pitfalls.append("TRUTH_NOT_RETRIEVED")
 
     return {
+        "finder_id":         finder_id,
         "idx":               int(idx),
         "run_id":            run_id,
         "mode":              mode or "dense",
@@ -721,13 +725,13 @@ def run_analysis(
     _run(print_summary,            rows)
     _run(print_judge_summary,      rows, use_llm_judge)
 
-    out_csv = eval_path.parent / eval_path.name.replace("eval_", "analysis_").replace(".json", ".csv")
-    out_txt = out_csv.with_suffix(".txt")
+    out_xlsx = eval_path.parent / "analysis" / eval_path.name.replace("eval_", "analysis_").replace(".json", ".xlsx")
+    out_txt = out_xlsx.with_suffix(".txt")
 
-    pd.DataFrame(rows).to_csv(out_csv, index=False)
+    pd.DataFrame(rows).to_excel(out_xlsx, index=False)
     out_txt.write_text("".join(report_parts), encoding="utf-8")
 
-    print(f"\nSaved → {out_csv}")
+    print(f"\nSaved → {out_xlsx}")
     print(f"Saved → {out_txt}")
 
 
@@ -744,7 +748,7 @@ def main():
     """
     use_llm_judge = "--judge" in sys.argv
     positional    = [a for a in sys.argv[1:] if not a.startswith("--")]
-    eval_path     = Path(positional[0]) if positional else EVAL_FILE
+    eval_path     = Path(positional[0]) #if positional else EVAL_FILE
 
     print(f"Corpus dir: {CHUNKS_DIR}")
     corpus, fp_index = load_corpus()
@@ -768,7 +772,9 @@ if __name__ == "__main__":
     USE_LLM_JUDGE = False   # set True to enable Phi-4 judging for all runs
 
     eval_files = [
-        # Path("/Users/nadavsmacbookair/Desktop/Thesis/data/eval_results/eval_20260626_1537.json"),
+        "/Users/nadavsmacbookair/Desktop/Thesis/data/eval_results/TSLA_HEADER_HYBRID_PLAIN_TIERED_eval_20260627_1201.json",
+        "/Users/nadavsmacbookair/Desktop/Thesis/data/eval_results/TSLA_HEADER_HYBRID_ENHANCED_TIERED_eval_20260627_1208.json"
+
     ]
 
     if not eval_files:

@@ -1,4 +1,5 @@
 #%%
+import re
 import subprocess
 from datetime import datetime
 from types import SimpleNamespace
@@ -61,11 +62,31 @@ def extract_metadata(query: str, model, tokenizer) -> dict:
     return meta
 
 
+_REFUSAL_RE = re.compile(
+    r"^(i (can'?t|cannot|am unable|won'?t)|sorry[,. ]|i'?m sorry)",
+    re.IGNORECASE,
+)
+
+def _refusal_fallback(raw: str, original: str) -> str:
+    """Return the usable rewrite; fall back to original if the model refused."""
+    if not _REFUSAL_RE.match(raw.strip()):
+        return raw.strip()
+    # Salvage: take whatever follows a transition phrase like "as requested" / "however"
+    parts = re.split(r"(?:as requested[,.]?|however[,.]?)\s*", raw, flags=re.IGNORECASE)
+    candidate = parts[-1].strip() if len(parts) > 1 else ""
+    orig_tokens = set(original.lower().split())
+    if candidate and any(tok in candidate.lower() for tok in orig_tokens):
+        return candidate
+    print(f"  [enhance] refusal detected — passing original query through")
+    return original
+
+
 def enhance_query(query: str, model, tokenizer) -> str:
     prompt = QUERY_ENHANCEMENT_PROMPT.format(query=query)
     messages = [{"role": "user", "content": prompt}]
     formatted = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    return generate(model, tokenizer, prompt=formatted, verbose=False).strip()
+    raw = generate(model, tokenizer, prompt=formatted, verbose=False)
+    return _refusal_fallback(raw, query)
 
 
 def run_evaluation(
@@ -79,8 +100,8 @@ def run_evaluation(
     levels:     list    = None,
     modes:      list    = None,   # any subset of ["dense", "sparse", "hybrid"]
     enhance_query_flag:  bool = False,
-    use_tiered_years:    bool = True,  # proportional top_k per year when year is a list
-    notes = " " # add info to save.
+    use_tiered_years:    bool = True,
+    tickers:    list    = None,   # used for output filename
 ) -> pd.DataFrame:
     if levels is None:
         levels = list(COLLECTIONS_2.keys())
@@ -109,6 +130,7 @@ def run_evaluation(
     results_list = []
 
     for q_idx, (_, row) in enumerate(finder_df.iterrows()):
+        finder_id    = row.get("_id", "")
         query        = row.get("query", "")
         truth_answer = row.get("truth_answer", "")
         truth_ref    = row.get("truth_ref", "")
@@ -146,8 +168,12 @@ def run_evaluation(
             # ── Dense retrieval — once per level, reused across modes ──
             dense_results = None
             if need_dense:
-                print(f"  [dense] collection='{coll_name_dense}' filters={filters} top_k={prefetch_k}")
-                dense_results = search_with_payload(coll_name_dense, query_vec, payload_must=filters, top_k=prefetch_k)
+                if is_tiered:
+                    print(f"  [dense-tiered] collection='{coll_name_dense}' years={year_val} top_k={prefetch_k}")
+                    dense_results = search_dense_tiered(coll_name_dense, query_vec, base_filters, year_val, prefetch_k)
+                else:
+                    print(f"  [dense] collection='{coll_name_dense}' filters={filters} top_k={prefetch_k}")
+                    dense_results = search_with_payload(coll_name_dense, query_vec, payload_must=filters, top_k=prefetch_k)
                 dense_pts = dense_results.points if hasattr(dense_results, "points") else []
                 print(f"  [dense] {len(dense_pts)} hits | scores={[round(p.score, 3) for p in dense_pts]}")
 
@@ -155,8 +181,12 @@ def run_evaluation(
             # Uses the same enhanced query as dense, but without the Gemma-specific prefix.
             sparse_results = None
             if need_sparse:
-                print(f"  [bm25]  collection='{COLL_BM25}' query='{query[:60]}...'")
-                sparse_results = search_bm25(COLL_BM25, query, payload_must=filters, top_k=prefetch_k)
+                if is_tiered:
+                    print(f"  [bm25-tiered]  collection='{COLL_BM25}' years={year_val} query='{query[:50]}...'")
+                    sparse_results = search_bm25_tiered(COLL_BM25, query, base_filters, year_val, prefetch_k)
+                else:
+                    print(f"  [bm25]  collection='{COLL_BM25}' query='{query[:60]}...'")
+                    sparse_results = search_bm25(COLL_BM25, query, payload_must=filters, top_k=prefetch_k)
                 sparse_pts = sparse_results.points if hasattr(sparse_results, "points") else []
                 print(f"  [bm25]  {len(sparse_pts)} hits")
 
@@ -210,6 +240,7 @@ def run_evaluation(
                 )
 
                 results_list.append({
+                    "finder_id":     finder_id,
                     "run_id":        run_id,
                     "level":         level,
                     "mode":          mode,
@@ -224,15 +255,22 @@ def run_evaluation(
     ts         = datetime.now().strftime("%Y%m%d_%H%M")
     results_df = pd.DataFrame(results_list)
 
+    tickers_tag = "-".join(t.upper() for t in sorted(tickers)) if tickers else "ALL"
+    levels_tag  = "-".join(levels).upper()
+    modes_tag   = "-".join(modes).upper()
+    enh_tag     = "ENHANCED" if enhance_query_flag else "PLAIN"
+    yr_tag      = "TIERED" if use_tiered_years else "FLAT"
+    tag = f"{tickers_tag}_{levels_tag}_{modes_tag}_{enh_tag}_{yr_tag}"
+
     n_empty = (results_df["rag_answer"] == "No relevant context retrieved.").sum()
     print(f"\n── Evaluation complete ──")
     print(f"  Total: {len(results_df)} | Empty answers: {n_empty}")
 
-    results_df.to_csv(f"{output_dir}/{notes}_eval_{ts}.csv",   index=False)
-    results_df.to_pickle(f"{output_dir}/{notes}eval_{ts}.pkl")
-    results_df.to_json(f"{output_dir}/{notes}eval_{ts}.json")
+    results_df.to_csv(f"{output_dir}/{tag}_eval_{ts}.csv",   index=False)
+    results_df.to_pickle(f"{output_dir}/{tag}_eval_{ts}.pkl")
+    results_df.to_json(f"{output_dir}/{tag}_eval_{ts}.json")
 
-    print(f"  Saved → {output_dir}/eval_{ts}.{{csv,pkl,json}}")
+    print(f"  Saved → {output_dir}/{tag}_eval_{ts}.{{csv,pkl,json}}")
     return results_df
 
 
@@ -240,9 +278,8 @@ def main(
         tickers,
         enhance_query_flag=True,
         levels=["header"],
-        modes=["hybrid"],  # dense embedding computed once per query
-        use_tiered_years = True,
-        notes = "",
+        modes=["hybrid"],
+        use_tiered_years=True,
 ):
     tickers   = tickers
     finder_df = run_finder(tickers=tickers)
@@ -260,19 +297,21 @@ def main(
         top_k=6,
         enhance_query_flag=enhance_query_flag,
         levels=levels,
-        modes=modes,  # dense embedding computed once per query
-        use_tiered_years = use_tiered_years,
-        notes = notes,
+        modes=modes,
+        use_tiered_years=use_tiered_years,
+        tickers=tickers,
     )
     print(results)
 
 #%%
 if __name__ == "__main__":
     configs = [
-        dict(tickers=["tsla"], enhance_query_flag=True, levels=["header"], modes=["hybrid"], use_tiered_years=False, notes="TSLA-HYBRID_QUERY-ENHANCED"),
-        dict(tickers=["tsla"], enhance_query_flag=True, levels=["header"], modes=["hybrid"], use_tiered_years=True,  notes="TSLA-TIERED_YEARS-HYBRID_QUERY-ENHANCED"),
-        dict(tickers=["pypl"], enhance_query_flag=True, levels=["header"], modes=["hybrid"], use_tiered_years=False, notes="PYPL-HYBRID_QUERY-ENHANCED"),
-        dict(tickers=["pypl"], enhance_query_flag=True, levels=["header"], modes=["hybrid"], use_tiered_years=True,  notes="PYPL-TIERED_YEARS-HYBRID_QUERY-ENHANCED"),
+        dict(tickers=["tsla"], enhance_query_flag=False, levels=["header"], modes=["hybrid"], use_tiered_years=True),
+        dict(tickers=["tsla"], enhance_query_flag=True, levels=["header"], modes=["hybrid"], use_tiered_years=True),
+        dict(tickers=["tsla"], enhance_query_flag=False, levels=["header"], modes=["hybrid"], use_tiered_years=False),
+        dict(tickers=["tsla"], enhance_query_flag=True, levels=["header"], modes=["hybrid"], use_tiered_years=False),
+        # dict(tickers=["pypl"], enhance_query_flag=True,  levels=["header"], modes=["hybrid"], use_tiered_years=True),
+        # dict(tickers=["nvda"], enhance_query_flag=True,  levels=["header"], modes=["hybrid"], use_tiered_years=True),
     ]
 
     # Load models once — reloading per run would add ~2 min overhead each iteration
@@ -282,7 +321,7 @@ if __name__ == "__main__":
     embed_model, embed_tokenizer = emb_load("mlx-community/embeddinggemma-300m-bf16")
 
     for i, cfg in enumerate(configs):
-        print(f"\n{'='*60}\nRun {i+1}/{len(configs)}: {cfg['notes']}\n{'='*60}")
+        print(f"\n{'='*60}\nRun {i+1}/{len(configs)}: {cfg['tickers']}\n{'='*60}")
         finder_df = run_finder(tickers=cfg["tickers"])
         run_evaluation(
             finder_df=finder_df,
@@ -295,5 +334,5 @@ if __name__ == "__main__":
             levels=cfg["levels"],
             modes=cfg["modes"],
             use_tiered_years=cfg["use_tiered_years"],
-            notes=cfg["notes"],
+            tickers=cfg["tickers"],
         )
