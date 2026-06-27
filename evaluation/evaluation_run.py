@@ -43,10 +43,12 @@ from evaluation_functions import score_row
 
 CHUNKS_DIR = Path("/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/chunks/hierarchical/indexed-at-26-06-26/header")
 
-LOW_SCORE_THRESH = 0.60   # cosine similarity threshold — only meaningful for dense mode
-SCORE_GAP_THRESH = 0.03   # min gap between best and worst retrieved score; small gap = undiscriminated results
-FINGERPRINT_LEN  = 200    # chars of normalised text used as a fast exact-match key in fp_index
-FUZZY_THRESH     = 0.80   # SequenceMatcher ratio needed to declare a fuzzy truth-chunk match
+LOW_SCORE_THRESH      = 0.60   # cosine similarity threshold — only meaningful for dense mode
+SCORE_GAP_THRESH      = 0.03   # min gap between best and worst retrieved score; small gap = undiscriminated results
+FINGERPRINT_LEN       = 200    # chars of normalised text used as a fast exact-match key in fp_index
+FUZZY_THRESH          = 0.80   # SequenceMatcher ratio needed to declare a fuzzy truth-chunk match
+NUM_CONTAINMENT_THRESH = 0.85  # fraction of chunk's numbers that must appear in the truth ref
+MIN_CHUNK_NUMS        = 4      # minimum distinct numbers a chunk must have to qualify for number-containment
 
 
 # ── Corpus loading ────────────────────────────────────────────────────────────
@@ -54,6 +56,13 @@ FUZZY_THRESH     = 0.80   # SequenceMatcher ratio needed to declare a fuzzy trut
 def _norm(text: str) -> str:
     """Collapse whitespace and lowercase — used for all text comparisons."""
     return re.sub(r"\s+", " ", str(text).strip()).lower()
+
+
+_NUM_RE = re.compile(r"-?[\d,]+\.?\d*")
+
+def _numbers(text: str) -> set[str]:
+    """Extract distinctive numeric tokens (integers, decimals, comma-formatted)."""
+    return set(_NUM_RE.findall(text))
 
 
 def load_corpus() -> tuple[pd.DataFrame, dict[str, str]]:
@@ -87,37 +96,65 @@ def load_corpus() -> tuple[pd.DataFrame, dict[str, str]]:
     return corpus, fp_index
 
 
-def find_truth_chunk(truth_text: str, corpus: pd.DataFrame, fp_index: dict[str, str]) -> str | None:
+def find_truth_chunks(truth_text: str, corpus: pd.DataFrame, fp_index: dict[str, str]) -> list[str]:
     """
-    Locate the corpus chunk that best matches a FinDER truth passage.
+    Locate all corpus chunks contained within a FinDER truth passage.
 
-    Search strategy (in order of cost):
-      1. Exact fingerprint match against fp_index (O(1)).
-      2. Shorter prefix match (100 and 50 chars) to handle trailing whitespace differences.
-      3. SequenceMatcher fuzzy match on first 500 chars (O(n) over full corpus — slow but
-         only reached when exact match fails, which typically means the filing year is not
-         indexed or the text was extracted with a different parser).
+    FinDER truth passages and corpus chunks use different text formats (tab/newline
+    vs markdown pipe tables), so substring matching is unreliable. Two complementary
+    strategies are combined:
 
-    Returns the chunk UUID string, or None if no match meets FUZZY_THRESH.
+    Step 1 — Fingerprint / fuzzy (text-based, works for narrative passages):
+      Exact match on first 200/100/50 normalised chars, then SequenceMatcher fallback.
+      Finds chunks where the text format happens to align (non-table sections).
+
+    Step 2 — Number-containment scan (format-agnostic, works for financial tables):
+      Extracts the numeric tokens from the truth passage and from each corpus chunk.
+      A chunk is "contained" if ≥ NUM_CONTAINMENT_THRESH of its numbers appear in the
+      truth ref AND it has at least MIN_CHUNK_NUMS distinct numbers (to avoid spurious
+      matches from chunks that only contain year values like 2023/2024).
+
+    Returns a deduplicated list of chunk UUIDs. Empty list if nothing matches.
     """
-    norm = _norm(truth_text)
+    found: set[str] = set()
+    norm_truth = _norm(truth_text)
 
-    fp = norm[:FINGERPRINT_LEN]
+    # ── Step 1a: exact fingerprint ──
+    fp = norm_truth[:FINGERPRINT_LEN]
     if fp in fp_index:
-        return fp_index[fp]
+        found.add(fp_index[fp])
 
-    for plen in (100, 50):
-        short = norm[:plen]
-        for idx_fp, cid in fp_index.items():
-            if idx_fp[:plen] == short:
-                return cid
+    # ── Step 1b: shorter prefix fallback ──
+    if not found:
+        for plen in (100, 50):
+            short = norm_truth[:plen]
+            for idx_fp, cid in fp_index.items():
+                if idx_fp[:plen] == short:
+                    found.add(cid)
+                    break
+            if found:
+                break
 
-    for _, row in corpus.iterrows():
-        ratio = SequenceMatcher(None, norm[:500], _norm(row["text"])[:500]).ratio()
-        if ratio >= FUZZY_THRESH:
-            return row["id"]
+    # ── Step 2: number-containment scan ──
+    truth_nums = _numbers(truth_text)
+    if truth_nums:
+        for _, row in corpus.iterrows():
+            chunk_nums = _numbers(row["text"])
+            if len(chunk_nums) < MIN_CHUNK_NUMS:
+                continue
+            containment = len(chunk_nums & truth_nums) / len(chunk_nums)
+            if containment >= NUM_CONTAINMENT_THRESH:
+                found.add(row["id"])
 
-    return None
+    # ── Step 3: fuzzy fallback (only when both steps above found nothing) ──
+    if not found:
+        for _, row in corpus.iterrows():
+            ratio = SequenceMatcher(None, norm_truth[:500], _norm(row["text"])[:500]).ratio()
+            if ratio >= FUZZY_THRESH:
+                found.add(row["id"])
+                break  # take first fuzzy match only
+
+    return list(found)
 
 
 # ── Parsing rag_retrieved string ──────────────────────────────────────────────
@@ -283,24 +320,29 @@ def analyze_entry(idx: str, data: dict, corpus: pd.DataFrame, fp_index: dict) ->
                 wrong_year_detail.append(f"{fy_year}∉{q_years}")
 
     # ── Truth chunk lookup ─────────────────────────────────────────────────────
-    # truth_corpus_ids: for each FinDER reference passage, the matched PKL chunk UUID
-    # (or None if the filing is not in the indexed corpus at all)
-    truth_corpus_ids: list[str | None] = [
-        find_truth_chunk(ref, corpus, fp_index) for ref in truth_refs
+    # truth_corpus_ids: for each FinDER reference passage, the list of PKL chunk UUIDs
+    # that are contained within it (empty list = not in indexed corpus).
+    # A passage can map to multiple chunks when the FinDER passage spans several
+    # header-level Qdrant chunks (common for financial tables).
+    truth_corpus_ids: list[list[str]] = [
+        find_truth_chunks(ref, corpus, fp_index) for ref in truth_refs
     ]
-    n_truth_in_corpus = sum(c is not None for c in truth_corpus_ids)
+    n_truth_in_corpus = sum(len(ids) > 0 for ids in truth_corpus_ids)
 
     retrieved_id_set  = set(retrieved_ids)
     n_truth_retrieved = sum(
-        c is not None and c in retrieved_id_set for c in truth_corpus_ids
+        any(cid in retrieved_id_set for cid in ids)
+        for ids in truth_corpus_ids
+        if ids
     )
 
     best_truth_rank = None
-    for cid in truth_corpus_ids:
-        if cid and cid in retrieved_ids:
-            rank = retrieved_ids.index(cid) + 1
-            if best_truth_rank is None or rank < best_truth_rank:
-                best_truth_rank = rank
+    for ids in truth_corpus_ids:
+        for cid in ids:
+            if cid in retrieved_ids:
+                rank = retrieved_ids.index(cid) + 1
+                if best_truth_rank is None or rank < best_truth_rank:
+                    best_truth_rank = rank
 
     # ── Word / number recall ───────────────────────────────────────────────────
     # score_row compares the truth_refs text against the full retrieved context string
@@ -341,7 +383,10 @@ def analyze_entry(idx: str, data: dict, corpus: pd.DataFrame, fp_index: dict) ->
         "n_truth_in_corpus": n_truth_in_corpus,
         "n_truth_retrieved": n_truth_retrieved,
         "best_truth_rank":   best_truth_rank,
-        "truth_chunk_ids":   " | ".join(str(c) if c else "NOT_IN_CORPUS" for c in truth_corpus_ids),
+        "truth_chunk_ids":   " | ".join(
+            ", ".join(ids) if ids else "NOT_IN_CORPUS"
+            for ids in truth_corpus_ids
+        ),
         "word_recall":       coverage["word_recall"],
         "num_recall":        coverage["num_recall"],
         "evidence_hit":      coverage["evidence_hit"],

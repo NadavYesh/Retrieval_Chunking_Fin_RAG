@@ -1,4 +1,5 @@
 #%%
+import gc
 import re
 import subprocess
 from datetime import datetime
@@ -15,7 +16,7 @@ from prompts import META_EXTRACT_PROMPT, QUERY_ENHANCEMENT_PROMPT
 from FinDER import run_finder
 from db.database import get_qdrant_client
 from mlx_lm import generate, load
-import mlx.core
+import mlx.core as mx
 from mlx_embeddings.utils import load as emb_load
 from utils import parse_metadata_response, sanitize_year_extraction, extract_ticker_hint
 
@@ -49,6 +50,8 @@ def extract_metadata(query: str, model, tokenizer) -> dict:
     ]
     prompt   = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     response = generate(model, tokenizer, prompt=prompt, verbose=False)
+    gc.collect() # garbage collector takes all processes that are taking memory but arent in use any more. and clears them
+    mx.clear_cache()
     meta     = parse_metadata_response(response, fallback_query=query)
 
     # Sanitize year: convert strings/shorthands to integer(s)
@@ -69,6 +72,7 @@ _REFUSAL_RE = re.compile(
 
 def _refusal_fallback(raw: str, original: str) -> str:
     """Return the usable rewrite; fall back to original if the model refused."""
+    # זה יעזור לי להבין למה תמיד קורה הפולבאק.
     if not _REFUSAL_RE.match(raw.strip()):
         return raw.strip()
     # Salvage: take whatever follows a transition phrase like "as requested" / "however"
@@ -81,12 +85,24 @@ def _refusal_fallback(raw: str, original: str) -> str:
     return original
 
 
+MAX_ENHANCE_RETRIES = 3
+
 def enhance_query(query: str, model, tokenizer) -> str:
-    prompt = QUERY_ENHANCEMENT_PROMPT.format(query=query)
-    messages = [{"role": "user", "content": prompt}]
+    prompt    = QUERY_ENHANCEMENT_PROMPT.format(query=query)
+    messages  = [{"role": "user", "content": prompt}]
     formatted = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    raw = generate(model, tokenizer, prompt=formatted, verbose=False)
-    return _refusal_fallback(raw, query)
+
+    for attempt in range(1, MAX_ENHANCE_RETRIES + 1):
+        raw = generate(model, tokenizer, prompt=formatted, verbose=False, max_tokens=300)
+        gc.collect()
+        mx.clear_cache()
+        print(f"  [enhance attempt {attempt}] {len(raw)} chars: {repr(raw[:80])}")
+        if raw.strip():
+            return _refusal_fallback(raw, query)
+        print(f"  [enhance attempt {attempt}] empty output — retrying")
+
+    print(f"  [ERROR] enhance_query: empty output after {MAX_ENHANCE_RETRIES} attempts — falling back to original query")
+    return query
 
 
 def run_evaluation(
@@ -135,7 +151,6 @@ def run_evaluation(
         truth_answer = row.get("truth_answer", "")
         truth_ref    = row.get("truth_ref", "")
         print(f"\n[Q {q_idx+1}/{len(finder_df)}] {query[:80]}...")
-
         if enhance_query_flag:
             query = enhance_query(query, gen_model, gen_tokenizer)
             print(f"  [enhance] → {query[:120]}...")
@@ -274,6 +289,236 @@ def run_evaluation(
     return results_df
 
 
+def run_multi_evaluation(
+    configs:         list[dict],
+    gen_model,
+    gen_tokenizer,
+    embed_model,
+    embed_tokenizer,
+    output_dir: str = "/Users/nadavsmacbookair/Desktop/Thesis/data/eval_results",
+    top_k:      int = 6,
+) -> None:
+    """
+    Run multiple evaluation configs, reusing expensive LLM/embedding/retrieval calls
+    wherever the results would be identical across configs.
+
+    Caching hierarchy (per question, within a ticker group):
+      1. enhanced_query  — one LLM call per question, shared by all enhance=True configs.
+      2. metadata + embedding — one call per unique query_text (original or enhanced).
+      3. dense + BM25 retrieval — one search per (query_text, level, use_tiered_years),
+                                   using the max prefetch_k needed by any sharing config.
+      4. generation — not cached (context varies by mode/top_k).
+
+    Configs are grouped by ticker set so finder_df is also loaded only once per group.
+    Each config produces its own output file with an auto-generated filename.
+    """
+    from collections import defaultdict
+
+    # ── Group configs by sorted ticker tuple ──────────────────────────────────
+    ticker_groups: dict[tuple, list[tuple[int, dict]]] = defaultdict(list)
+    for i, cfg in enumerate(configs):
+        key = tuple(sorted(cfg["tickers"]))
+        ticker_groups[key].append((i, cfg))
+
+    for ticker_tuple, cfg_group in ticker_groups.items():
+        tickers    = list(ticker_tuple)
+        finder_df  = run_finder(tickers=tickers)
+        if finder_df.empty:
+            print(f"  [skip] no FinDER questions for {tickers}")
+            continue
+
+        n_q = len(finder_df)
+        print(f"\n{'='*60}\nTicker group: {tickers}  |  {n_q} questions  |  {len(cfg_group)} config(s)\n{'='*60}")
+
+        # Determine the union of needs across all configs in this group
+        any_enhanced  = any(cfg["enhance_query_flag"] for _, cfg in cfg_group)
+        union_levels  = sorted({l for _, cfg in cfg_group for l in cfg["levels"]})
+        union_modes   = {m for _, cfg in cfg_group for m in cfg["modes"]}
+        union_tiered  = {cfg["use_tiered_years"] for _, cfg in cfg_group}
+        need_dense    = any(m in {"dense", "hybrid"} for m in union_modes)
+        need_sparse   = any(m in {"sparse", "hybrid"} for m in union_modes)
+
+        # Pre-compute max prefetch_k per (query_text_kind, level, use_tiered) key.
+        # "query_text_kind" is "enhanced" or "plain" — proxy for actual query text.
+        def _prefetch_k_for(enhance_flag, level, use_tiered):
+            relevant = [
+                cfg for _, cfg in cfg_group
+                if cfg["enhance_query_flag"] == enhance_flag
+                and level in cfg["levels"]
+                and cfg["use_tiered_years"] == use_tiered
+            ]
+            return max(
+                (top_k * 3 if "hybrid" in cfg["modes"] else top_k for cfg in relevant),
+                default=top_k,
+            )
+
+        # Initialise per-config result accumulators
+        result_lists = {i: [] for i, _ in cfg_group}
+
+        for q_idx, (_, row) in enumerate(finder_df.iterrows()):
+            finder_id    = row.get("_id", "")
+            orig_query   = row.get("query", "")
+            truth_answer = row.get("truth_answer", "")
+            truth_ref    = row.get("truth_ref", "")
+            print(f"\n[Q {q_idx+1}/{n_q}] {orig_query[:80]}...")
+
+            # ── Cache 1: enhanced query (one LLM call if any config needs it) ──
+            enh_query = None
+            if any_enhanced:
+                enh_query = enhance_query(orig_query, gen_model, gen_tokenizer)
+                print(f"  [enhance] → {enh_query[:100]}...")
+
+            # ── Cache 2: metadata + embedding per query_text ──────────────────
+            # query_texts we actually need depend on which enhance flags are in use
+            needed_texts: set[str] = {orig_query}
+            if enh_query:
+                needed_texts.add(enh_query)
+
+            query_cache: dict[str, dict] = {}
+            for qt in needed_texts:
+                meta       = extract_metadata(qt, gen_model, gen_tokenizer)
+                query_vec  = None
+                if need_dense:
+                    tokens    = embed_tokenizer.encode(
+                        f"task: search result | query: {qt}", return_tensors="mlx"
+                    )
+                    query_vec = embed_model(tokens).text_embeds.tolist()[0]
+                query_cache[qt] = {"meta": meta, "vec": query_vec}
+                print(f"  [meta/{('enh' if qt == enh_query else 'orig')}] "
+                      f"ticker={meta.get('ticker')} year={meta.get('year')}")
+
+            # ── Cache 3: retrieval per (query_text, level, use_tiered) ─────────
+            retrieval_cache: dict[tuple, dict] = {}
+
+            for qt, qdata in query_cache.items():
+                meta        = qdata["meta"]
+                query_vec   = qdata["vec"]
+                year_val    = meta.get("year")
+                base_filters = {k: meta[k] for k in ("ticker", "form_type") if meta.get(k)}
+                filters      = {**base_filters, "year": year_val} if year_val else base_filters
+                enh_flag     = (qt == enh_query) if enh_query else False
+
+                for level in union_levels:
+                    for use_tiered in union_tiered:
+                        rkey = (qt, level, use_tiered)
+                        if rkey in retrieval_cache:
+                            continue
+
+                        is_tiered  = use_tiered and isinstance(year_val, list) and len(year_val) > 1
+                        pk         = _prefetch_k_for(enh_flag, level, use_tiered)
+                        level_cfg  = COLLECTIONS_2[level]
+                        coll_dense = level_cfg["coll_name"]
+
+                        dense_results = None
+                        if need_dense:
+                            if is_tiered:
+                                dense_results = search_dense_tiered(coll_dense, query_vec, base_filters, year_val, pk)
+                            else:
+                                dense_results = search_with_payload(coll_dense, query_vec, payload_must=filters, top_k=pk)
+                            pts = dense_results.points if hasattr(dense_results, "points") else []
+                            print(f"  [dense/{level}/tiered={is_tiered}] {len(pts)} hits")
+
+                        sparse_results = None
+                        if need_sparse:
+                            if is_tiered:
+                                sparse_results = search_bm25_tiered(COLL_BM25, qt, base_filters, year_val, pk)
+                            else:
+                                sparse_results = search_bm25(COLL_BM25, qt, payload_must=filters, top_k=pk)
+                            pts = sparse_results.points if hasattr(sparse_results, "points") else []
+                            print(f"  [bm25/{level}/tiered={is_tiered}]  {len(pts)} hits")
+
+                        retrieval_cache[rkey] = {
+                            "dense":            dense_results,
+                            "sparse":           sparse_results,
+                            "is_tiered":        is_tiered,
+                            "use_parent_fetch": level_cfg["use_parent_fetch"],
+                            "meta":             meta,
+                        }
+
+            # ── Run each config against cached results ────────────────────────
+            for cfg_idx, cfg in cfg_group:
+                qt      = enh_query if (cfg["enhance_query_flag"] and enh_query) else orig_query
+                qdata   = query_cache[qt]
+                meta    = qdata["meta"]
+
+                for level in cfg["levels"]:
+                    rkey  = (qt, level, cfg["use_tiered_years"])
+                    rc    = retrieval_cache[rkey]
+                    dense_results     = rc["dense"]
+                    sparse_results    = rc["sparse"]
+                    use_parent_fetch  = rc["use_parent_fetch"]
+
+                    for mode in cfg["modes"]:
+                        run_id = f"{meta.get('ticker','?')}_{meta.get('year','?')}_{level}_{mode}_{q_idx}"
+                        print(f"    [cfg {cfg_idx}] mode={mode} enh={cfg['enhance_query_flag']} tiered={cfg['use_tiered_years']}")
+
+                        context_points = []
+                        rag_answer     = ""
+                        try:
+                            if mode == "dense":
+                                context_points = (dense_results.points if hasattr(dense_results, "points") else [])[:top_k]
+                            elif mode == "sparse":
+                                context_points = (sparse_results.points if hasattr(sparse_results, "points") else [])[:top_k]
+                            elif mode == "hybrid":
+                                context_points = rrf_fuse(dense_results, sparse_results, top_k=top_k)
+
+                            if use_parent_fetch and mode in {"dense", "hybrid"} and context_points:
+                                parent_ids = list({
+                                    p.payload.get("parent_id")
+                                    for p in context_points
+                                    if p.payload.get("parent_id")
+                                })
+                                if parent_ids:
+                                    parent_records = client.retrieve(PARENT_COLL, ids=parent_ids, with_payload=True)
+                                    context_points = parent_records
+
+                            if not context_points:
+                                rag_answer = "No relevant context retrieved."
+                            else:
+                                wrapped = SimpleNamespace(points=context_points)
+                                rag_answer, _ = generate_llm_answer(
+                                    meta["optimized_query"], wrapped, gen_model, gen_tokenizer
+                                )
+                                print(f"      [gen] {len(rag_answer)} chars: {rag_answer[:80].strip()}...")
+
+                        except Exception as e:
+                            print(f"      [ERROR] {e}")
+
+                        rag_ret = "".join(
+                            f"======================\nSource Number {p_n}\n {p}"
+                            for p_n, p in enumerate(context_points)
+                        )
+                        result_lists[cfg_idx].append({
+                            "finder_id":     finder_id,
+                            "run_id":        run_id,
+                            "level":         level,
+                            "mode":          mode,
+                            "query":         qt,
+                            "truth_answer":  truth_answer,
+                            "truth_ref":     truth_ref,
+                            "rag_answer":    rag_answer,
+                            "rag_retrieved": rag_ret,
+                        })
+
+        # ── Save one file per config ──────────────────────────────────────────
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d_%H%M")
+        for cfg_idx, cfg in cfg_group:
+            results_df  = pd.DataFrame(result_lists[cfg_idx])
+            tickers_tag = "-".join(t.upper() for t in sorted(tickers))
+            levels_tag  = "-".join(cfg["levels"]).upper()
+            modes_tag   = "-".join(cfg["modes"]).upper()
+            enh_tag     = "ENHANCED" if cfg["enhance_query_flag"] else "PLAIN"
+            yr_tag      = "TIERED" if cfg["use_tiered_years"] else "FLAT"
+            tag         = f"{tickers_tag}_{levels_tag}_{modes_tag}_{enh_tag}_{yr_tag}"
+            n_empty     = (results_df["rag_answer"] == "No relevant context retrieved.").sum()
+            print(f"\n  [cfg {cfg_idx}] {tag}: {len(results_df)} rows | {n_empty} empty")
+            results_df.to_csv(f"{output_dir}/{tag}_eval_{ts}.csv",   index=False)
+            results_df.to_pickle(f"{output_dir}/{tag}_eval_{ts}.pkl")
+            results_df.to_json(f"{output_dir}/{tag}_eval_{ts}.json")
+            print(f"  Saved → {output_dir}/{tag}_eval_{ts}.{{csv,pkl,json}}")
+
+
 def main(
         tickers,
         enhance_query_flag=True,
@@ -306,10 +551,10 @@ def main(
 #%%
 if __name__ == "__main__":
     configs = [
-        dict(tickers=["tsla"], enhance_query_flag=False, levels=["header"], modes=["hybrid"], use_tiered_years=True),
-        dict(tickers=["tsla"], enhance_query_flag=True, levels=["header"], modes=["hybrid"], use_tiered_years=True),
-        dict(tickers=["tsla"], enhance_query_flag=False, levels=["header"], modes=["hybrid"], use_tiered_years=False),
         dict(tickers=["tsla"], enhance_query_flag=True, levels=["header"], modes=["hybrid"], use_tiered_years=False),
+        dict(tickers=["tsla"], enhance_query_flag=True, levels=["header"], modes=["hybrid"], use_tiered_years=True),
+        dict(tickers=["tsla"], enhance_query_flag=False, levels=["header"], modes=["hybrid"], use_tiered_years=True),
+        dict(tickers=["tsla"], enhance_query_flag=False, levels=["header"], modes=["hybrid"], use_tiered_years=False),
         # dict(tickers=["pypl"], enhance_query_flag=True,  levels=["header"], modes=["hybrid"], use_tiered_years=True),
         # dict(tickers=["nvda"], enhance_query_flag=True,  levels=["header"], modes=["hybrid"], use_tiered_years=True),
     ]
@@ -320,19 +565,11 @@ if __name__ == "__main__":
     print("Loading embedding model...")
     embed_model, embed_tokenizer = emb_load("mlx-community/embeddinggemma-300m-bf16")
 
-    for i, cfg in enumerate(configs):
-        print(f"\n{'='*60}\nRun {i+1}/{len(configs)}: {cfg['tickers']}\n{'='*60}")
-        finder_df = run_finder(tickers=cfg["tickers"])
-        run_evaluation(
-            finder_df=finder_df,
-            gen_model=gen_model,
-            gen_tokenizer=gen_tokenizer,
-            embed_model=embed_model,
-            embed_tokenizer=embed_tokenizer,
-            top_k=6,
-            enhance_query_flag=cfg["enhance_query_flag"],
-            levels=cfg["levels"],
-            modes=cfg["modes"],
-            use_tiered_years=cfg["use_tiered_years"],
-            tickers=cfg["tickers"],
-        )
+    run_multi_evaluation(
+        configs=configs,
+        gen_model=gen_model,
+        gen_tokenizer=gen_tokenizer,
+        embed_model=embed_model,
+        embed_tokenizer=embed_tokenizer,
+        top_k=6,
+    )
