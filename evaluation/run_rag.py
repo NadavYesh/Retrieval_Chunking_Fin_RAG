@@ -581,34 +581,34 @@ def run_multi_evaluation(
             print(f"  Saved → {output_dir}/{tag}_eval_{ts}.json")
 
 
-def main(
-        tickers,
-        enhance_query_flag=True,
-        levels=["header"],
-        retrieval_modes=["hybrid"],
-        use_tiered_years=True,
-):
-    tickers   = tickers
-    finder_df = run_finder(tickers=tickers)
-    print("Loading generation model...")
-    gen_model, gen_tokenizer = load("mlx-community/Llama-3.2-3B-Instruct-4bit")
+# def main(
+#         tickers,
+#         enhance_query_flag=True,
+#         levels=["header"],
+#         retrieval_modes=["hybrid"],
+#         use_tiered_years=True,
+# ):
+#     tickers   = tickers
+#     finder_df = run_finder(tickers=tickers)
+#     print("Loading generation model...")
+#     gen_model, gen_tokenizer = load("mlx-community/Llama-3.2-3B-Instruct-4bit")
 
-    print("Loading embedding model...")
-    embed_model, embed_tokenizer = emb_load("mlx-community/embeddinggemma-300m-bf16")
-    results = run_evaluation(
-        finder_df=finder_df,
-        gen_model=gen_model,
-        gen_tokenizer=gen_tokenizer,
-        embed_model=embed_model,
-        embed_tokenizer=embed_tokenizer,
-        top_k=6,
-        enhance_query_flag=enhance_query_flag,
-        levels=levels,
-        retrieval_modes=retrieval_modes,
-        use_tiered_years=use_tiered_years,
-        tickers=tickers,
-    )
-    print(results)
+#     print("Loading embedding model...")
+#     embed_model, embed_tokenizer = emb_load("mlx-community/embeddinggemma-300m-bf16")
+#     results = run_evaluation(
+#         finder_df=finder_df,
+#         gen_model=gen_model,
+#         gen_tokenizer=gen_tokenizer,
+#         embed_model=embed_model,
+#         embed_tokenizer=embed_tokenizer,
+#         top_k=6,
+#         enhance_query_flag=enhance_query_flag,
+#         levels=levels,
+#         retrieval_modes=retrieval_modes,
+#         use_tiered_years=use_tiered_years,
+#         tickers=tickers,
+#     )
+#     print(results)
 
 #%%
 if __name__ == "__main__":

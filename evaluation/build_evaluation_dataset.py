@@ -97,7 +97,7 @@ def build_dataset(
                 "query":          orig_query,
                 "enhanced_query": enhanced,
                 "truth_answer":   row.get("truth_answer", ""),
-                "truth_ref":      json.dumps(truth_ref) if not isinstance(truth_ref, str) else truth_ref,
+                "truth_ref":      truth_ref if isinstance(truth_ref, str) else json.dumps(truth_ref.tolist() if hasattr(truth_ref, "tolist") else list(truth_ref)),
                 "category":       row.get("category", ""),
                 "query_type":     row.get("type", ""),
                 "meta_orig":      json.dumps(meta_orig),
@@ -112,6 +112,7 @@ def build_dataset(
             rows.append(entry)
             existing.add((finder_id, ticker))
 
+            # saving procedure
             pd.DataFrame(rows).to_parquet(output_path, index=False)
             print(f"  [saved] {len(rows)} rows → {output_path}")
 
@@ -125,7 +126,7 @@ if __name__ == "__main__":
     from mlx_lm import load
     from mlx_embeddings.utils import load as emb_load
 
-    tickers = ["tsla"]
+    tickers = ["intc"]
 
     print("Loading generation model...")
     gen_model, gen_tokenizer = load("mlx-community/Llama-3.2-3B-Instruct-4bit")

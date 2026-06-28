@@ -8,6 +8,7 @@ Interface mirrors run_rag.py so configs are interchangeable.
 
 import json
 from collections import defaultdict
+from itertools import product
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -104,7 +105,7 @@ def run_evaluation_lazy(
         truth_ref    = row.get("truth_ref", "")
         category     = row.get("category", "")
         query_type   = row.get("type", "")
-        print(f"\n[Q {q_idx+1}/{len(finder_df)}] {orig_query[:80]}...")
+        print(f"\n[Original Query {q_idx+1}/{len(finder_df)}] {orig_query[:80]}...")
 
         precomp = _lookup(dataset, finder_id, ticker_str, enhance_query_flag)
         query       = precomp["query"]
@@ -258,8 +259,14 @@ def run_multi_evaluation_lazy(
     """
     Multi-config lazy evaluation. Retrieval is still cached across configs per question
     (identical to run_multi_evaluation), but precompute steps come from the dataset.
+
+    All configs write into a single output JSON. Each row carries explicit config columns
+    (enhance_query_flag, use_tiered_years, use_section_routing, config_key) so the
+    analysis script can group and compare configs without parsing filenames.
     """
-    client = get_qdrant_client()
+    client  = get_qdrant_client()
+    all_rows: list[dict] = []
+    ts = datetime.now().strftime("%Y%m%d_%H%M")
 
     ticker_groups: dict[tuple, list[tuple[int, dict]]] = defaultdict(list)
     for i, cfg in enumerate(configs):
@@ -293,8 +300,7 @@ def run_multi_evaluation_lazy(
                 default=top_k,
             )
 
-        result_lists = {i: [] for i, _ in cfg_group}
-        ticker_str   = tickers[0] if len(tickers) == 1 else "multi"
+        ticker_str = tickers[0] if len(tickers) == 1 else "multi"
 
         for q_idx, (_, row) in enumerate(finder_df.iterrows()):
             finder_id    = row.get("_id", "")
@@ -308,7 +314,10 @@ def run_multi_evaluation_lazy(
             # Build per-enhance-flag precomputed lookup (orig + enhanced variants)
             precomp_cache: dict[bool, dict] = {}
             for enh_flag in {cfg["enhance_query_flag"] for _, cfg in cfg_group}:
+                # precomp_cache gathers per ticker-config pair the correct queries.
                 precomp_cache[enh_flag] = _lookup(dataset, finder_id, ticker_str, enh_flag)
+                if enh_flag:
+                    print(f"  [precomp enhance] → {precomp_cache[enh_flag]['query'][:80]}...")
 
             # Retrieval cache: (query_text, level, use_tiered) → {dense, sparse}
             retrieval_cache: dict[tuple, dict] = {}
@@ -425,39 +434,71 @@ def run_multi_evaluation_lazy(
                             print(f"      [ERROR] {e}")
 
                         rag_ret = "".join(f"======================\nSource Number {p_n}\n {p}" for p_n, p in enumerate(context_points))
-                        result_lists[cfg_idx].append({
-                            "finder_id":      finder_id,
-                            "run_id":         run_id,
-                            "level":          level,
-                            "retrieval_mode": retrieval_mode,
-                            "query":          orig_query,
-                            "query_enhanced": pc["enhanced_query"] if enh_flag else None,
-                            "category":       category,
-                            "query_type":     query_type,
-                            "truth_answer":   truth_answer,
-                            "truth_ref":      truth_ref,
-                            "rag_answer":     rag_answer,
-                            "rag_retrieved":  rag_ret,
+                        all_rows.append({
+                            "finder_id":           finder_id,
+                            "run_id":              run_id,
+                            "level":               level,
+                            "retrieval_mode":      retrieval_mode,
+                            "ticker_filter":       ticker_str,
+                            "enhance_query_flag":  enh_flag,
+                            "use_tiered_years":    cfg["use_tiered_years"],
+                            "use_section_routing": use_sec,
+                            "config_key":          f"{level}_{retrieval_mode}_{'ENH' if enh_flag else 'PLAIN'}_{'TIERED' if cfg['use_tiered_years'] else 'FLAT'}_{'ROUTED' if use_sec else 'UNROUTED'}",
+                            "query":               orig_query,
+                            "query_enhanced":      pc["enhanced_query"] if enh_flag else None,
+                            "category":            category,
+                            "query_type":          query_type,
+                            "truth_answer":        truth_answer,
+                            "truth_ref":           truth_ref,
+                            "rag_answer":          rag_answer,
+                            "rag_retrieved":       rag_ret,
                         })
 
-        # Save one file per config
-        Path(output_dir).mkdir(parents=True, exist_ok=True)
-        ts = datetime.now().strftime("%Y%m%d_%H%M")
-        for cfg_idx, cfg in cfg_group:
-            results_df  = pd.DataFrame(result_lists[cfg_idx])
-            tickers_tag = "-".join(t.upper() for t in sorted(tickers))
-            tag = (f"LAZY_{tickers_tag}_"
-                   f"{'-'.join(cfg['levels']).upper()}_"
-                   f"{'-'.join(cfg['retrieval_modes']).upper()}_"
-                   f"{'ENHANCED' if cfg['enhance_query_flag'] else 'PLAIN'}_"
-                   f"{'TIERED' if cfg['use_tiered_years'] else 'FLAT'}_"
-                   f"{'ROUTED' if cfg.get('use_section_routing', False) else 'UNROUTED'}")
-            n_empty = (results_df["rag_answer"] == "No relevant context retrieved.").sum()
-            print(f"\n  [cfg {cfg_idx}] {tag}: {len(results_df)} rows | {n_empty} empty")
-            results_df.to_json(f"{output_dir}/{tag}_eval_{ts}.json")
-            print(f"  Saved → {output_dir}/{tag}_eval_{ts}.json")
-
     client.close()
+
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    tickers_all = sorted({cfg["tickers"][0] for cfg in configs})
+    tag         = "-".join(t.upper() for t in tickers_all)
+    out_path    = f"{output_dir}/eval_multi_{tag}_{ts}.json"
+    results_df  = pd.DataFrame(all_rows)
+    results_df.to_json(out_path)
+    n_empty = (results_df["rag_answer"] == "No relevant context retrieved.").sum()
+    print(f"\n── Multi eval complete ──")
+    print(f"  Total rows: {len(all_rows)} | Empty: {n_empty} | Configs: {len(configs)}")
+    print(f"  Saved → {out_path}")
+
+
+def write_config(
+    tickers:         list[str],
+    levels:          list[str] = ["header"],
+    retrieval_modes: list[str] = ["hybrid"],
+) -> list[dict]:
+    """
+    Generate all permutations of evaluation configs for the given tickers.
+
+    Boolean flags (enhance_query_flag, use_tiered_years, use_section_routing) are
+    always fully permuted (2^3 = 8 combinations). Each value in `levels` and
+    `retrieval_modes` is treated as its own dimension, so the total number of
+    configs is: len(tickers) × len(levels) × len(retrieval_modes) × 8.
+    """
+    configs = []
+    for ticker, level, mode, enhance, tiered, routed in product(
+        tickers,
+        levels,
+        retrieval_modes,
+        [True, False],   # enhance_query_flag
+        [True, False],   # use_tiered_years
+        [True, False],   # use_section_routing
+    ):
+        configs.append({
+            "tickers":            [ticker],
+            "levels":             [level],
+            "retrieval_modes":    [mode],
+            "enhance_query_flag": enhance,
+            "use_tiered_years":   tiered,
+            "use_section_routing": routed,
+        })
+    return configs
 
 
 if __name__ == "__main__":
@@ -467,10 +508,12 @@ if __name__ == "__main__":
     if dataset.empty:
         raise SystemExit(f"Dataset not found at {DATASET_PATH}. Run build_evaluation_dataset.py first.")
 
-    configs = [
-        dict(tickers=["tsla"], enhance_query_flag=True, levels=["header"],
-             retrieval_modes=["hybrid"], use_tiered_years=True, use_section_routing=True),
-    ]
+    configs = write_config(
+        tickers=["wmt"],
+        levels=["header"],
+        retrieval_modes=["hybrid"],
+    )
+    print(f"Running {len(configs)} configs...")
 
     print("Loading generation model...")
     gen_model, gen_tokenizer = load("mlx-community/Llama-3.2-3B-Instruct-4bit")
@@ -480,5 +523,5 @@ if __name__ == "__main__":
         dataset=dataset,
         gen_model=gen_model,
         gen_tokenizer=gen_tokenizer,
-        top_k=6,
+        top_k=5,
     )
