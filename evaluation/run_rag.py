@@ -9,11 +9,12 @@ from pathlib import Path
 import sys
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 from search_engine import (
-    search_with_payload, search_bm25, rrf_fuse, generate_llm_answer,
+    search_with_payload, search_bm25, rrf_fuse, rrf_fuse_multi, generate_llm_answer,
     search_dense_tiered, search_bm25_tiered,
 )
 from prompts import META_EXTRACT_PROMPT, QUERY_ENHANCEMENT_PROMPT
 from FinDER import run_finder
+from evaluation.section_routing import make_section_filter, route, routing_stats
 from db.database import get_qdrant_client
 from mlx_lm import generate, load
 import mlx.core as mx
@@ -124,34 +125,35 @@ def run_evaluation(
     output_dir: str     = "/Users/nadavsmacbookair/Desktop/Thesis/data/eval_results",
     top_k:      int     = 5,
     levels:     list    = None,
-    modes:      list    = None,   # any subset of ["dense", "sparse", "hybrid"]
+    retrieval_modes:      list    = None,   # any subset of ["dense", "sparse", "hybrid"]
     enhance_query_flag:  bool = False,
     use_tiered_years:    bool = True,
+    use_section_routing: bool = False,
     tickers:    list    = None,   # used for output filename
 ) -> pd.DataFrame:
     if levels is None:
         levels = list(COLLECTIONS_2.keys())
     if isinstance(levels, str):
         levels = [levels]
-    if modes is None:
-        modes = ["dense"]
-    if isinstance(modes, str):
-        modes = [modes]
-    unknown = set(modes) - VALID_MODES
+    if retrieval_modes is None:
+        retrieval_modes = ["dense"]
+    if isinstance(retrieval_modes, str):
+        retrieval_modes = [retrieval_modes]
+    unknown = set(retrieval_modes) - VALID_MODES
     if unknown:
-        raise ValueError(f"Unknown modes: {unknown}. Valid: {VALID_MODES}")
+        raise ValueError(f"Unknown retrieval_modes: {unknown}. Valid: {VALID_MODES}")
 
     if finder_df.empty:
         print("No FinDER questions found.")
         return pd.DataFrame()
 
-    need_dense  = any(m in {"dense",  "hybrid"} for m in modes)
-    need_sparse = any(m in {"sparse", "hybrid"} for m in modes)
+    need_dense  = any(m in {"dense",  "hybrid"} for m in retrieval_modes)
+    need_sparse = any(m in {"sparse", "hybrid"} for m in retrieval_modes)
     # For hybrid, retrieve wider candidate sets before RRF fusion.
-    prefetch_k  = top_k * 3 if "hybrid" in modes else top_k ###################
+    prefetch_k  = top_k * 3 if "hybrid" in retrieval_modes else top_k ###################
 
-    total_runs = len(finder_df) * len(levels) * len(modes)
-    print(f"Questions: {len(finder_df)} | Levels: {levels} | Modes: {modes} | Total runs: {total_runs}")
+    total_runs = len(finder_df) * len(levels) * len(retrieval_modes)
+    print(f"Questions: {len(finder_df)} | Levels: {levels} | Modes: {retrieval_modes} | Total runs: {total_runs}")
 
     results_list = []
 
@@ -160,6 +162,8 @@ def run_evaluation(
         orig_query   = row.get("query", "")
         truth_answer = row.get("truth_answer", "")
         truth_ref    = row.get("truth_ref", "")
+        category     = row.get("category", "")
+        query_type   = row.get("type", "")
         print(f"\n[Q {q_idx+1}/{len(finder_df)}] {orig_query[:80]}...")
         query         = orig_query
         query_enhanced = None
@@ -180,7 +184,7 @@ def run_evaluation(
         if is_tiered:
             print(f"  [tiered] years={year_val} — using proportional top_k per year")
 
-        # ── Dense embedding — computed ONCE per query, reused across levels and modes ──
+        # ── Dense embedding — computed ONCE per query, reused across levels and retrieval_modes ──
         query_vec = None
         if need_dense:
             formatted_query = f"task: search result | query: {query}"
@@ -193,7 +197,7 @@ def run_evaluation(
             use_parent_fetch = level_cfg["use_parent_fetch"]
             print(f"\n  ── level: {level} ──")
 
-            # ── Dense retrieval — once per level, reused across modes ──
+            # ── Track B: global dense retrieval (baseline, reused across retrieval_modes) ──
             dense_results = None
             if need_dense:
                 if is_tiered:
@@ -205,8 +209,7 @@ def run_evaluation(
                 dense_pts = dense_results.points if hasattr(dense_results, "points") else []
                 print(f"  [dense] {len(dense_pts)} hits | scores={[round(p.score, 3) for p in dense_pts]}")
 
-            # ── BM25 sparse retrieval — once per level, reused across modes ──
-            # Uses the same enhanced query as dense, but without the Gemma-specific prefix.
+            # ── Track B: global BM25 retrieval ──
             sparse_results = None
             if need_sparse:
                 if is_tiered:
@@ -218,25 +221,80 @@ def run_evaluation(
                 sparse_pts = sparse_results.points if hasattr(sparse_results, "points") else []
                 print(f"  [bm25]  {len(sparse_pts)} hits")
 
-            for mode in modes:
-                run_id = f"{meta.get('ticker','?')}_{meta.get('year','?')}_{level}_{mode}_{q_idx}"
-                print(f"\n    ── mode: {mode} ──")
+            # ── Track A: section-targeted retrieval (only when routing is on) ──
+            sec_dense_results  = None
+            sec_sparse_results = None
+            if use_section_routing:
+                sec_filter = make_section_filter(category)
+                if sec_filter:
+                    sec_k = max(prefetch_k // 2, top_k)
+                    if need_dense:
+                        sec_dense_results = search_with_payload(
+                            coll_name_dense, query_vec,
+                            payload_must=filters, top_k=sec_k,
+                            extra_filter=sec_filter,
+                        )
+                        sec_pts = sec_dense_results.points if hasattr(sec_dense_results, "points") else []
+                        print(f"  [dense-section] cat={category!r} {len(sec_pts)} hits")
+                    if need_sparse:
+                        sec_sparse_results = search_bm25(
+                            COLL_BM25, query,
+                            payload_must=filters, top_k=sec_k,
+                            extra_filter=sec_filter,
+                        )
+                        sec_spts = sec_sparse_results.points if hasattr(sec_sparse_results, "points") else []
+                        print(f"  [bm25-section]  cat={category!r} {len(sec_spts)} hits")
+
+            for retrieval_mode in retrieval_modes:
+                run_id = f"{meta.get('ticker','?')}_{meta.get('year','?')}_{level}_{retrieval_mode}_{q_idx}"
+                print(f"\n    ── retrieval_mode: {retrieval_mode} ──")
 
                 context_points = []
                 rag_answer     = ""
 
                 try:
-                    # ── Build context_points for this mode ──
-                    # context points are the points sent to generator
-                    if mode == "dense":
-                        context_points = (dense_results.points if hasattr(dense_results, "points") else [])[:top_k]
-                    elif mode == "sparse":
-                        context_points = (sparse_results.points if hasattr(sparse_results, "points") else [])[:top_k]
-                    elif mode == "hybrid":
-                        context_points = rrf_fuse(dense_results, sparse_results, top_k=top_k)
+                    # ── Build candidate pool for this retrieval_mode ──
+                    if retrieval_mode == "dense":
+                        track_b = (dense_results.points if hasattr(dense_results, "points") else [])
+                        if use_section_routing and sec_dense_results is not None:
+                            track_a = (sec_dense_results.points if hasattr(sec_dense_results, "points") else [])
+                            candidates = rrf_fuse_multi([SimpleNamespace(points=track_a), SimpleNamespace(points=track_b)], top_k=prefetch_k)
+                        else:
+                            candidates = track_b
+                    elif retrieval_mode == "sparse":
+                        track_b = (sparse_results.points if hasattr(sparse_results, "points") else [])
+                        if use_section_routing and sec_sparse_results is not None:
+                            track_a = (sec_sparse_results.points if hasattr(sec_sparse_results, "points") else [])
+                            # fuse track A and track B if section routing is used. 
+                            # track A is the actual new thing that mapps keyword to sections; track B is the simpler
+                            # unrouted approach.
+                            # it relates the section specific rounting
+
+                            candidates = rrf_fuse_multi([SimpleNamespace(points=track_a), SimpleNamespace(points=track_b)], top_k=prefetch_k)
+                        else:
+                            candidates = track_b
+                    elif retrieval_mode == "hybrid":
+                        if use_section_routing and (sec_dense_results is not None or sec_sparse_results is not None):
+                            result_sets = [dense_results, sparse_results]
+                            if sec_dense_results is not None:
+                                result_sets.append(sec_dense_results)
+                            if sec_sparse_results is not None:
+                                result_sets.append(sec_sparse_results)
+                            # now fuse.
+                            candidates = rrf_fuse_multi(result_sets, top_k=prefetch_k)
+                        else:
+                            candidates = rrf_fuse(dense_results, sparse_results, top_k=prefetch_k)
+
+                    # ── Section routing: re-rank candidate pool by section tier ──
+                    if use_section_routing:
+                        stats = routing_stats(candidates, category)
+                        print(f"    [route] {stats} → taking top {top_k}")
+                        context_points = route(candidates, category, top_k)
+                    else:
+                        context_points = candidates[:top_k]
 
                     # ── Parent fetch (dense/hybrid only, when configured) ──
-                    if use_parent_fetch and mode in {"dense", "hybrid"} and context_points:
+                    if use_parent_fetch and retrieval_mode in {"dense", "hybrid"} and context_points:
                         parent_ids = list({
                             p.payload.get("parent_id")
                             for p in context_points
@@ -260,7 +318,7 @@ def run_evaluation(
                         print(f"    [generate] {len(rag_answer)} chars: {rag_answer[:120].strip()}{'...' if len(rag_answer) > 120 else ''}")
 
                 except Exception as e:
-                    print(f"    [ERROR] {mode}: {e}")
+                    print(f"    [ERROR] {retrieval_mode}: {e}")
 
                 rag_ret = "".join(
                     f"======================\nSource Number {p_n}\n {p}"
@@ -271,9 +329,11 @@ def run_evaluation(
                     "finder_id":      finder_id,
                     "run_id":         run_id,
                     "level":          level,
-                    "mode":           mode,
+                    "retrieval_mode":           retrieval_mode,
                     "query":          orig_query,
                     "query_enhanced": query_enhanced,
+                    "category":       category,
+                    "query_type":     query_type,
                     "truth_answer":   truth_answer,
                     "truth_ref":      truth_ref,
                     "rag_answer":     rag_answer,
@@ -286,10 +346,11 @@ def run_evaluation(
 
     tickers_tag = "-".join(t.upper() for t in sorted(tickers)) if tickers else "ALL"
     levels_tag  = "-".join(levels).upper()
-    modes_tag   = "-".join(modes).upper()
+    modes_tag   = "-".join(retrieval_modes).upper()
     enh_tag     = "ENHANCED" if enhance_query_flag else "PLAIN"
     yr_tag      = "TIERED" if use_tiered_years else "FLAT"
-    tag = f"{tickers_tag}_{levels_tag}_{modes_tag}_{enh_tag}_{yr_tag}"
+    sec_tag     = "ROUTED" if use_section_routing else "UNROUTED"
+    tag = f"{tickers_tag}_{levels_tag}_{modes_tag}_{enh_tag}_{yr_tag}_{sec_tag}"
 
     n_empty = (results_df["rag_answer"] == "No relevant context retrieved.").sum()
     print(f"\n── Evaluation complete ──")
@@ -320,7 +381,7 @@ def run_multi_evaluation(
       2. metadata + embedding — one call per unique query_text (original or enhanced).
       3. dense + BM25 retrieval — one search per (query_text, level, use_tiered_years),
                                    using the max prefetch_k needed by any sharing config.
-      4. generation — not cached (context varies by mode/top_k).
+      4. generation — not cached (context varies by retrieval_mode/top_k).
 
     Configs are grouped by ticker set so finder_df is also loaded only once per group.
     Each config produces its own output file with an auto-generated filename.
@@ -344,9 +405,10 @@ def run_multi_evaluation(
         print(f"\n{'='*60}\nTicker group: {tickers}  |  {n_q} questions  |  {len(cfg_group)} config(s)\n{'='*60}")
 
         # Determine the union of needs across all configs in this group
-        any_enhanced  = any(cfg["enhance_query_flag"] for _, cfg in cfg_group)
+        any_enhanced        = any(cfg["enhance_query_flag"] for _, cfg in cfg_group)
+        any_section_routing = any(cfg.get("use_section_routing", False) for _, cfg in cfg_group)
         union_levels  = sorted({l for _, cfg in cfg_group for l in cfg["levels"]})
-        union_modes   = {m for _, cfg in cfg_group for m in cfg["modes"]}
+        union_modes   = {m for _, cfg in cfg_group for m in cfg["retrieval_modes"]}
         union_tiered  = {cfg["use_tiered_years"] for _, cfg in cfg_group}
         need_dense    = any(m in {"dense", "hybrid"} for m in union_modes)
         need_sparse   = any(m in {"sparse", "hybrid"} for m in union_modes)
@@ -361,7 +423,7 @@ def run_multi_evaluation(
                 and cfg["use_tiered_years"] == use_tiered
             ]
             return max(
-                (top_k * 3 if "hybrid" in cfg["modes"] else top_k for cfg in relevant),
+                (top_k * 3 if "hybrid" in cfg["retrieval_modes"] else top_k for cfg in relevant),
                 default=top_k,
             )
 
@@ -373,6 +435,8 @@ def run_multi_evaluation(
             orig_query   = row.get("query", "")
             truth_answer = row.get("truth_answer", "")
             truth_ref    = row.get("truth_ref", "")
+            category     = row.get("category", "")
+            query_type   = row.get("type", "")
             print(f"\n[Q {q_idx+1}/{n_q}] {orig_query[:80]}...")
 
             # ── Cache 1: enhanced query (one LLM call if any config needs it) ──
@@ -400,7 +464,7 @@ def run_multi_evaluation(
                 print(f"  [meta/{('enh' if qt == enh_query else 'orig')}] "
                       f"ticker={meta.get('ticker')} year={meta.get('year')}")
 
-            # ── Cache 3: retrieval per (query_text, level, use_tiered) ─────────
+            # ── Cache 3: Track B global retrieval per (query_text, level, use_tiered) ──
             retrieval_cache: dict[tuple, dict] = {}
 
             for qt, qdata in query_cache.items():
@@ -446,13 +510,59 @@ def run_multi_evaluation(
                             "is_tiered":        is_tiered,
                             "use_parent_fetch": level_cfg["use_parent_fetch"],
                             "meta":             meta,
+                            "filters":          filters,
+                            "query_vec":        query_vec,
+                            "pk":               pk,
                         }
+
+            # ── Cache 4: Track A section-targeted retrieval per (query_text, level) ──
+            # Category varies per question, so this cache is rebuilt each question.
+            # Shared across configs that request section routing.
+            section_cache: dict[tuple, dict] = {}
+            if any_section_routing:
+                sec_filter = make_section_filter(category)
+                if sec_filter:
+                    for qt, qdata in query_cache.items():
+                        meta      = qdata["meta"]
+                        query_vec = qdata["vec"]
+                        year_val  = meta.get("year")
+                        filters   = {k: meta[k] for k in ("ticker", "form_type") if meta.get(k)}
+                        if year_val:
+                            filters = {**filters, "year": year_val}
+                        for level in union_levels:
+                            skey = (qt, level)
+                            if skey in section_cache:
+                                continue
+                            level_cfg  = COLLECTIONS_2[level]
+                            coll_dense = level_cfg["coll_name"]
+                            rkey_ref   = (qt, level, next(iter(union_tiered)))
+                            pk         = retrieval_cache.get(rkey_ref, {}).get("pk", top_k)
+                            sec_k      = max(pk // 2, top_k)
+
+                            sec_dense  = None
+                            sec_sparse = None
+                            if need_dense and query_vec is not None:
+                                sec_dense = search_with_payload(
+                                    coll_dense, query_vec, payload_must=filters,
+                                    top_k=sec_k, extra_filter=sec_filter,
+                                )
+                                pts = sec_dense.points if hasattr(sec_dense, "points") else []
+                                print(f"  [dense-section/{level}] cat={category!r} {len(pts)} hits")
+                            if need_sparse:
+                                sec_sparse = search_bm25(
+                                    COLL_BM25, qt, payload_must=filters,
+                                    top_k=sec_k, extra_filter=sec_filter,
+                                )
+                                pts = sec_sparse.points if hasattr(sec_sparse, "points") else []
+                                print(f"  [bm25-section/{level}]  cat={category!r} {len(pts)} hits")
+                            section_cache[skey] = {"dense": sec_dense, "sparse": sec_sparse}
 
             # ── Run each config against cached results ────────────────────────
             for cfg_idx, cfg in cfg_group:
                 qt      = enh_query if (cfg["enhance_query_flag"] and enh_query) else orig_query
                 qdata   = query_cache[qt]
                 meta    = qdata["meta"]
+                use_sec = cfg.get("use_section_routing", False)
 
                 for level in cfg["levels"]:
                     rkey  = (qt, level, cfg["use_tiered_years"])
@@ -460,22 +570,50 @@ def run_multi_evaluation(
                     dense_results     = rc["dense"]
                     sparse_results    = rc["sparse"]
                     use_parent_fetch  = rc["use_parent_fetch"]
+                    pk_cached         = rc["pk"]
 
-                    for mode in cfg["modes"]:
-                        run_id = f"{meta.get('ticker','?')}_{meta.get('year','?')}_{level}_{mode}_{q_idx}"
-                        print(f"    [cfg {cfg_idx}] mode={mode} enh={cfg['enhance_query_flag']} tiered={cfg['use_tiered_years']}")
+                    # Track A section results (if available and requested)
+                    skey = (qt, level)
+                    sec_dense_r  = section_cache.get(skey, {}).get("dense")  if use_sec else None
+                    sec_sparse_r = section_cache.get(skey, {}).get("sparse") if use_sec else None
+
+                    for retrieval_mode in cfg["retrieval_modes"]:
+                        run_id = f"{meta.get('ticker','?')}_{meta.get('year','?')}_{level}_{retrieval_mode}_{q_idx}"
+                        print(f"    [cfg {cfg_idx}] retrieval_mode={retrieval_mode} enh={cfg['enhance_query_flag']} tiered={cfg['use_tiered_years']} routed={use_sec}")
 
                         context_points = []
                         rag_answer     = ""
                         try:
-                            if mode == "dense":
-                                context_points = (dense_results.points if hasattr(dense_results, "points") else [])[:top_k]
-                            elif mode == "sparse":
-                                context_points = (sparse_results.points if hasattr(sparse_results, "points") else [])[:top_k]
-                            elif mode == "hybrid":
-                                context_points = rrf_fuse(dense_results, sparse_results, top_k=top_k)
+                            # Build candidate pool fusing Track A + Track B
+                            if retrieval_mode == "dense":
+                                track_b = (dense_results.points if hasattr(dense_results, "points") else [])
+                                if use_sec and sec_dense_r is not None:
+                                    track_a = (sec_dense_r.points if hasattr(sec_dense_r, "points") else [])
+                                    candidates = rrf_fuse_multi([SimpleNamespace(points=track_a), SimpleNamespace(points=track_b)], top_k=pk_cached)
+                                else:
+                                    candidates = track_b
+                            elif retrieval_mode == "sparse":
+                                track_b = (sparse_results.points if hasattr(sparse_results, "points") else [])
+                                if use_sec and sec_sparse_r is not None:
+                                    track_a = (sec_sparse_r.points if hasattr(sec_sparse_r, "points") else [])
+                                    candidates = rrf_fuse_multi([SimpleNamespace(points=track_a), SimpleNamespace(points=track_b)], top_k=pk_cached)
+                                else:
+                                    candidates = track_b
+                            elif retrieval_mode == "hybrid":
+                                if use_sec and (sec_dense_r is not None or sec_sparse_r is not None):
+                                    result_sets = [r for r in [dense_results, sparse_results, sec_dense_r, sec_sparse_r] if r is not None]
+                                    candidates = rrf_fuse_multi(result_sets, top_k=pk_cached)
+                                else:
+                                    candidates = rrf_fuse(dense_results, sparse_results, top_k=pk_cached)
 
-                            if use_parent_fetch and mode in {"dense", "hybrid"} and context_points:
+                            if use_sec:
+                                stats = routing_stats(candidates, category)
+                                print(f"    [route] {stats} → taking top {top_k}")
+                                context_points = route(candidates, category, top_k)
+                            else:
+                                context_points = candidates[:top_k]
+
+                            if use_parent_fetch and retrieval_mode in {"dense", "hybrid"} and context_points:
                                 parent_ids = list({
                                     p.payload.get("parent_id")
                                     for p in context_points
@@ -505,9 +643,11 @@ def run_multi_evaluation(
                             "finder_id":      finder_id,
                             "run_id":         run_id,
                             "level":          level,
-                            "mode":           mode,
+                            "retrieval_mode":           retrieval_mode,
                             "query":          orig_query,
                             "query_enhanced": enh_query if cfg["enhance_query_flag"] else None,
+                            "category":       category,
+                            "query_type":     query_type,
                             "truth_answer":   truth_answer,
                             "truth_ref":      truth_ref,
                             "rag_answer":     rag_answer,
@@ -521,10 +661,11 @@ def run_multi_evaluation(
             results_df  = pd.DataFrame(result_lists[cfg_idx])
             tickers_tag = "-".join(t.upper() for t in sorted(tickers))
             levels_tag  = "-".join(cfg["levels"]).upper()
-            modes_tag   = "-".join(cfg["modes"]).upper()
+            modes_tag   = "-".join(cfg["retrieval_modes"]).upper()
             enh_tag     = "ENHANCED" if cfg["enhance_query_flag"] else "PLAIN"
             yr_tag      = "TIERED" if cfg["use_tiered_years"] else "FLAT"
-            tag         = f"{tickers_tag}_{levels_tag}_{modes_tag}_{enh_tag}_{yr_tag}"
+            sec_tag     = "ROUTED" if cfg.get("use_section_routing", False) else "UNROUTED"
+            tag         = f"{tickers_tag}_{levels_tag}_{modes_tag}_{enh_tag}_{yr_tag}_{sec_tag}"
             n_empty     = (results_df["rag_answer"] == "No relevant context retrieved.").sum()
             print(f"\n  [cfg {cfg_idx}] {tag}: {len(results_df)} rows | {n_empty} empty")
             results_df.to_json(f"{output_dir}/{tag}_eval_{ts}.json")
@@ -535,7 +676,7 @@ def main(
         tickers,
         enhance_query_flag=True,
         levels=["header"],
-        modes=["hybrid"],
+        retrieval_modes=["hybrid"],
         use_tiered_years=True,
 ):
     tickers   = tickers
@@ -554,7 +695,7 @@ def main(
         top_k=6,
         enhance_query_flag=enhance_query_flag,
         levels=levels,
-        modes=modes,
+        retrieval_modes=retrieval_modes,
         use_tiered_years=use_tiered_years,
         tickers=tickers,
     )
@@ -562,13 +703,21 @@ def main(
 
 #%%
 if __name__ == "__main__":
+    # ── Section routing experiment ─────────────────────────────────────────────
+    # Each ticker runs two configs back-to-back (UNROUTED vs ROUTED) so results
+    # are directly comparable.  Add more tickers by duplicating the pair below.
     configs = [
-        dict(tickers=["wmt"], enhance_query_flag=True, levels=["header"], modes=["hybrid"], use_tiered_years=False),
-        dict(tickers=["wmt"], enhance_query_flag=True, levels=["header"], modes=["hybrid"], use_tiered_years=True),
-        dict(tickers=["wmt"], enhance_query_flag=False, levels=["header"], modes=["hybrid"], use_tiered_years=True),
-        dict(tickers=["wmt"], enhance_query_flag=False, levels=["header"], modes=["hybrid"], use_tiered_years=False),
-        # dict(tickers=["pypl"], enhance_query_flag=True,  levels=["header"], modes=["hybrid"], use_tiered_years=True),
-        # dict(tickers=["nvda"], enhance_query_flag=True,  levels=["header"], modes=["hybrid"], use_tiered_years=True),
+        # Baseline (best prior config: enhanced + tiered)
+        # dict(tickers=["tsla"], enhance_query_flag=True, levels=["header"], retrieval_modes=["hybrid"], use_tiered_years=True,  use_section_routing=False),
+        # Section-routed counterpart — same everything, routing on
+        dict(tickers=["tsla"], enhance_query_flag=True, levels=["header"], retrieval_modes=["hybrid"], use_tiered_years=True,  use_section_routing=True),
+        
+        
+        # Extend to other tickers (uncomment as needed)
+        # dict(tickers=["nvda"], enhance_query_flag=True, levels=["header"], retrieval_modes=["hybrid"], use_tiered_years=True, use_section_routing=False),
+        # dict(tickers=["nvda"], enhance_query_flag=True, levels=["header"], retrieval_modes=["hybrid"], use_tiered_years=True, use_section_routing=True),
+        # dict(tickers=["wmt"],  enhance_query_flag=True, levels=["header"], retrieval_modes=["hybrid"], use_tiered_years=True, use_section_routing=False),
+        # dict(tickers=["wmt"],  enhance_query_flag=True, levels=["header"], retrieval_modes=["hybrid"], use_tiered_years=True, use_section_routing=True),
     ]
 
     # Load models once — reloading per run would add ~2 min overhead each iteration

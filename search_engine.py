@@ -74,9 +74,18 @@ def _build_filter(payload_must=None, payload_must_not=None, payload_should=None)
     return None
 
 
-def search_with_payload(coll_name, query_vec, payload_must=None, payload_must_not=None, payload_should=None, top_k=5):
-    """Dense vector search with optional payload filtering."""
+def search_with_payload(coll_name, query_vec, payload_must=None, payload_must_not=None, payload_should=None, top_k=5, extra_filter=None):
+    """Dense vector search with optional payload filtering.
+
+    extra_filter : a pre-built qdrant_models.Filter that is AND-ed with the
+                   payload filter (used for section-targeted Track A retrieval).
+    """
     query_filter = _build_filter(payload_must, payload_must_not, payload_should)
+    if extra_filter is not None:
+        if query_filter is not None:
+            query_filter = models.Filter(must=[query_filter, extra_filter])
+        else:
+            query_filter = extra_filter
     results_ = client.query_points(
         collection_name=coll_name,
         query=query_vec,
@@ -88,9 +97,17 @@ def search_with_payload(coll_name, query_vec, payload_must=None, payload_must_no
     return results_
 
 
-def search_bm25(coll_name_sparse, query_text, payload_must=None, top_k=5):
-    """BM25 sparse search against a collection ingested with qdrant/bm25 model."""
+def search_bm25(coll_name_sparse, query_text, payload_must=None, top_k=5, extra_filter=None):
+    """BM25 sparse search against a collection ingested with qdrant/bm25 model.
+
+    extra_filter : a pre-built qdrant_models.Filter AND-ed with the payload filter.
+    """
     query_filter = _build_filter(payload_must)
+    if extra_filter is not None:
+        if query_filter is not None:
+            query_filter = models.Filter(must=[query_filter, extra_filter])
+        else:
+            query_filter = extra_filter
     results_ = client.query_points(
         collection_name=coll_name_sparse,
         query=models.Document(text=query_text.lower(), model="qdrant/bm25"),

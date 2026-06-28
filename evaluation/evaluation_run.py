@@ -820,11 +820,11 @@ if __name__ == "__main__":
     # To run a single file interactively, pass it as a CLI arg instead:
     #   python evaluation_run.py path/to/eval_YYYYMMDD_HHMM.json [--judge]
 
-    USE_LLM_JUDGE = True   # set True to enable Phi-4 judging for all runs
+    USE_LLM_JUDGE = False   # set True to enable Phi-4 judging for all runs
 
     eval_files = [
-        "/Users/nadavsmacbookair/Desktop/Thesis/data/eval_results/TSLA_HEADER_HYBRID_ENHANCED_TIERED_eval_20260627_2216.json",
-        "/Users/nadavsmacbookair/Desktop/Thesis/data/eval_results/TSLA_HEADER_HYBRID_PLAIN_TIERED_eval_20260627_2216.json"
+        "/Users/nadavsmacbookair/Desktop/Thesis/data/eval_results/TSLA_HEADER_HYBRID_ENHANCED_TIERED_ROUTED_eval_20260628_1151.json",
+        
 
     ]
 
