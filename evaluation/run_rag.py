@@ -1,6 +1,4 @@
 #%%
-import gc
-import re
 import subprocess
 from datetime import datetime
 from types import SimpleNamespace
@@ -12,14 +10,12 @@ from search_engine import (
     search_with_payload, search_bm25, rrf_fuse, rrf_fuse_multi, generate_llm_answer,
     search_dense_tiered, search_bm25_tiered,
 )
-from prompts import META_EXTRACT_PROMPT, QUERY_ENHANCEMENT_PROMPT
 from FinDER import run_finder
 from evaluation.section_routing import make_section_filter, route, routing_stats
+from evaluation.rag_functions import enhance_query, extract_metadata, embed_query
 from db.database import get_qdrant_client
-from mlx_lm import generate, load
-import mlx.core as mx
+from mlx_lm import load
 from mlx_embeddings.utils import load as emb_load
-from utils import parse_metadata_response, sanitize_year_extraction, extract_ticker_hint
 
 client = get_qdrant_client()
 #%%
@@ -37,83 +33,6 @@ PARENT_COLL  = "--level 1 DENSE"
 COLL_BM25    = "--level 1 BM25"
 VALID_MODES  = {"dense", "sparse", "hybrid"}
 
-
-def extract_metadata(query: str, model, tokenizer) -> dict:
-    ticker_hint = extract_ticker_hint(query)
-
-    user_content = query
-    if ticker_hint:
-        user_content = f"{query}\n[Ticker hint: {ticker_hint.upper()}]"
-
-    messages = [
-        {"role": "system", "content": META_EXTRACT_PROMPT},
-        {"role": "user",   "content": user_content},
-    ]
-    prompt   = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    response = generate(model, tokenizer, prompt=prompt, verbose=False)
-    gc.collect() # garbage collector takes all processes that are taking memory but arent in use any more. and clears them
-    mx.clear_cache()
-    meta     = parse_metadata_response(response, fallback_query=query)
-
-    # Sanitize year: convert strings/shorthands to integer(s)
-    clean_year = sanitize_year_extraction(meta.get("year"), query=query)
-    meta["year"] = clean_year  # int, list[int], or None
-
-    # Fallback: use regex-extracted ticker if LLM returned nothing
-    if not meta.get("ticker") and ticker_hint: # if any is falsey
-        meta["ticker"] = ticker_hint
-
-    return meta
-
-
-_REFUSAL_RE = re.compile(
-    r"i (can'?t|cannot|am unable|won'?t|must decline|'?m not able)|"
-    r"i'?m sorry|^sorry[,. ]|"
-    r"this (request|query|question) (is|involves|relates to)|"
-    r"as an? (ai|language model|assistant)[,. ]",
-    re.IGNORECASE,
-)
-
-def _refusal_fallback(raw: str, original: str) -> str:
-    """Return the usable rewrite; fall back to original if the model refused."""
-    m = _REFUSAL_RE.search(raw)
-    if m is None:
-        return raw.strip()
-    # Try to salvage text before the refusal phrase
-    before = raw[:m.start()].strip()
-    if len(before) > 20:
-        return before
-    # Try transition phrases after the refusal
-    parts = re.split(r"(?:as requested[,.]?|however[,.]?|here is[,:]?)\s*", raw, flags=re.IGNORECASE)
-    candidate = parts[-1].strip() if len(parts) > 1 else ""
-    orig_tokens = set(original.lower().split())
-    if candidate and any(tok in candidate.lower() for tok in orig_tokens):
-        return candidate
-    print(f"  [enhance] refusal detected — passing original query through")
-    return original
-
-
-MAX_ENHANCE_RETRIES = 3
-
-def enhance_query(query: str, model, tokenizer) -> str:
-    messages  = [
-        {"role": "system", "content": QUERY_ENHANCEMENT_PROMPT},
-        {"role": "user",   "content": query},
-    ]
-    formatted = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-
-    for attempt in range(1, MAX_ENHANCE_RETRIES + 1):
-        print(f"*****************************\n\nThe raw user query is {query}" )
-        enhanced_raw = generate(model, tokenizer, prompt=formatted, verbose=False, max_tokens=300)
-        gc.collect()
-        mx.clear_cache()
-        print(f"  [enhance attempt {attempt} result:] {len(enhanced_raw)} chars: {repr(enhanced_raw[:80])}")
-        if enhanced_raw.strip():
-            return _refusal_fallback(enhanced_raw, query)
-        print(f"  [enhance attempt {attempt}] empty output — retrying")
-
-    print(f"  [ERROR] enhance_query: empty output after {MAX_ENHANCE_RETRIES} attempts — falling back to original query")
-    return query
 
 
 def run_evaluation(
@@ -184,12 +103,7 @@ def run_evaluation(
         if is_tiered:
             print(f"  [tiered] years={year_val} — using proportional top_k per year")
 
-        # ── Dense embedding — computed ONCE per query, reused across levels and retrieval_modes ──
-        query_vec = None
-        if need_dense:
-            formatted_query = f"task: search result | query: {query}"
-            query_tokens    = embed_tokenizer.encode(formatted_query, return_tensors="mlx")
-            query_vec       = embed_model(query_tokens).text_embeds.tolist()[0]
+        query_vec = embed_query(query, embed_model, embed_tokenizer) if need_dense else None
 
         for level in levels:
             level_cfg        = COLLECTIONS_2[level] ###########
@@ -454,12 +368,7 @@ def run_multi_evaluation(
             query_cache: dict[str, dict] = {}
             for qt in needed_texts:
                 meta       = extract_metadata(qt, gen_model, gen_tokenizer)
-                query_vec  = None
-                if need_dense:
-                    tokens    = embed_tokenizer.encode(
-                        f"task: search result | query: {qt}", return_tensors="mlx"
-                    )
-                    query_vec = embed_model(tokens).text_embeds.tolist()[0]
+                query_vec = embed_query(qt, embed_model, embed_tokenizer) if need_dense else None
                 query_cache[qt] = {"meta": meta, "vec": query_vec}
                 print(f"  [meta/{('enh' if qt == enh_query else 'orig')}] "
                       f"ticker={meta.get('ticker')} year={meta.get('year')}")
