@@ -81,5 +81,11 @@ def extract_metadata(query: str, model, tokenizer) -> dict:
 
 
 def embed_query(query: str, embed_model, embed_tokenizer) -> list[float]:
-    tokens = embed_tokenizer.encode(f"task: search result | query: {query}", return_tensors="mlx")
-    return embed_model(tokens).text_embeds.tolist()[0]
+    inputs = embed_tokenizer.batch_encode_plus(
+        [f"task: search result | query: {query}"],
+        return_tensors="mlx",
+        padding=True,
+        truncation=True,
+    )
+    outputs = embed_model(inputs["input_ids"], attention_mask=inputs["attention_mask"])
+    return outputs.text_embeds.tolist()[0]

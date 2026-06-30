@@ -24,7 +24,7 @@ import pandas as pd
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
-
+## SET BUILDERS
 def _tokens(text: str) -> set[str]:
     """Lowercase alphabetic/numeric tokens, strip punctuation.
     motivation: check word overlap, not sentene=ces. 
@@ -37,13 +37,13 @@ def _numbers(text: str) -> set[str]:
     """Numeric tokens: integers, decimals, negatives, comma-formatted."""
     return set(re.findall(r"-?[\d,]+\.?\d*", text))
 
-
+## CALCULATING ON SETS
 def _word_recall(evidence: str, context: str) -> float:
     ev_toks = _tokens(evidence)
     if not ev_toks:
         return 0.0
     ctx_toks = _tokens(context)
-    return len(ev_toks & ctx_toks) / len(ev_toks)
+    return len(ev_toks & ctx_toks) / len(ev_toks) # sums all overlaps 
 
 
 def _num_recall(evidence: str, context: str) -> float:

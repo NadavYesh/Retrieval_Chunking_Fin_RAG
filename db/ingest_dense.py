@@ -22,10 +22,14 @@ client = get_qdrant_client()
 
 ######################
 # Configuration
-COLL_NAME_DENSE = "--level 2 DENSE"
+COLL_NAME_DENSE = "--limited --level 1 DENSE"
+
+############### make false for not level 3
+LEVEL_3_ENRICHED = False 
+
 EMBED_META = False # this is misleading, as the current file embed textual meta.
 import os
-path_ = "/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/chunks/hierarchical/indexed-at-30-06-26/child"
+path_ = "/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/chunks/hierarchical/indexed-at-30-06-26-limited-with-enriched/header"
 files = os.listdir(path_)
 files = [f for f in files if f.endswith(".pkl")]
 paths=[os.path.join(path_,f)for f in files]
@@ -120,9 +124,10 @@ def upsert_data():
             chunk = pickle.load(f)
     
         # this is for captions. 
-        #texts = (chunk['description'] + chunk['text']).tolist()
-
-        texts = chunk['text'].tolist()
+        if LEVEL_3_ENRICHED:
+            texts = (chunk['description'] + chunk['text']).tolist()
+        else:
+            texts = chunk['text'].tolist()
         
         metadatas = chunk['metadata'].tolist() if hasattr(chunk['metadata'], 'tolist') else chunk['metadata']
         ids = chunk['id'].tolist() if 'id' in chunk.columns else [str(uuid.uuid4()) for _ in range(len(texts))]

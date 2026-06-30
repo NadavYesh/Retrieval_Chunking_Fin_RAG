@@ -18,9 +18,11 @@ from db.utils import get_batches
 
 client = get_qdrant_client()
 
-COLL_NAME_SPARSE = "--level 2 BM25"
+COLL_NAME_SPARSE = "--limited --level 3 BM25"
+LEVEL_3_ENRICHED = True  # control for enriched or not!!!!!!!!!!!!!!!!!!!!!!!
+
 BATCH_SIZE      = 64
-path_ = "/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/chunks/hierarchical/indexed-at-30-06-26/child"
+path_ = "/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/chunks/hierarchical/indexed-at-30-06-26-limited-with-enriched/enriched"
 files = [f for f in os.listdir(path_) if f.endswith(".pkl")]
 CHUNK_PATHS = [os.path.join(path_, f) for f in files]
 
@@ -59,8 +61,10 @@ def upsert_bm25_data():
         print(f"\nProcessing: {path}")
         with open(path, "rb") as f:
             chunk = pickle.load(f)
-
-        texts     = chunk["text"].tolist()
+        if LEVEL_3_ENRICHED:
+            texts     = (chunk['description'] + chunk['text']).tolist()
+        else:
+            texts     = chunk["text"].tolist()
         metadatas = chunk["metadata"].tolist() if hasattr(chunk["metadata"], "tolist") else list(chunk["metadata"])
         ids       = chunk["id"].tolist() if "id" in chunk.columns else [str(uuid.uuid4()) for _ in range(len(texts))]
 

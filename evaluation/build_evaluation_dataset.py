@@ -19,7 +19,7 @@ sys.path.append(str(Path(__file__).resolve().parent.parent))
 from FinDER import run_finder
 from evaluation.rag_functions import enhance_query, extract_metadata, embed_query
 
-DATASET_PATH = "/Users/nadavsmacbookair/Desktop/Thesis/data/eval_dataset/precomputed.parquet"
+DATASET_PATH = "/Users/nadavsmacbookair/Desktop/Thesis/data/eval_dataset/limited-new-precomputed.parquet"
 
 
 def _git_snapshot() -> dict:
@@ -126,7 +126,7 @@ if __name__ == "__main__":
     from mlx_lm import load
     from mlx_embeddings.utils import load as emb_load
 
-    tickers = ["intc"]
+    tickers = ["tsla","pypl"]
 
     print("Loading generation model...")
     gen_model, gen_tokenizer = load("mlx-community/Llama-3.2-3B-Instruct-4bit")
