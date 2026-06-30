@@ -390,6 +390,7 @@ def analyze_entry(idx: str, data: dict, corpus: pd.DataFrame, fp_index: dict,
     use_tiered_years     = data.get("use_tiered_years",     {}).get(idx)
     section_alpha        = data.get("section_alpha",         {}).get(idx)
     ticker_filter        = data.get("ticker_filter",        {}).get(idx)
+    level                = data.get("level",                {}).get(idx)
 
     if isinstance(truth_refs, str):
         try:
@@ -401,8 +402,10 @@ def analyze_entry(idx: str, data: dict, corpus: pd.DataFrame, fp_index: dict,
         truth_refs = []
 
     q_ticker, q_years, mode = parse_run_id(run_id)
-    # Prefer the explicit "mode" column when present (new eval format adds it)
-    if "mode" in data:
+    # run_rag_lazy writes "retrieval_mode"; older single-config format used "mode"
+    if "retrieval_mode" in data:
+        mode = data["retrieval_mode"].get(idx) or mode
+    elif "mode" in data:
         mode = data["mode"].get(idx, mode)
 
     retrieved     = parse_retrieved(retrieved_str)
@@ -529,6 +532,7 @@ def analyze_entry(idx: str, data: dict, corpus: pd.DataFrame, fp_index: dict,
         "query_type":          query_type,
         # ── Config columns (None for old-format JSONs) ──
         "config_key":          config_key,
+        "level":               level,
         "enhance_query_flag":  enhance_query_flag,
         "use_tiered_years":    use_tiered_years,
         "section_alpha":       section_alpha,
@@ -1003,7 +1007,7 @@ def _write_multi_excel(rows_df: pd.DataFrame, out_path: Path) -> None:
         for col in ("llm_relevance_int", "llm_completeness_int"):
             if col in df.columns:
                 agg_dict[col] = "mean"
-        for col in ("enhance_query_flag", "use_tiered_years", "section_alpha"):
+        for col in ("level", "mode", "enhance_query_flag", "use_tiered_years", "section_alpha"):
             if col in df.columns:
                 agg_dict[col] = "first"
 
@@ -1047,6 +1051,31 @@ def _write_multi_excel(rows_df: pd.DataFrame, out_path: Path) -> None:
         ] if c in df.columns]
         corr_df = df[corr_cols].apply(pd.to_numeric, errors="coerce").corr()
         corr_df.to_excel(writer, sheet_name="correlations")
+
+        # ── Sheet 6: dimension_summary ───────────────────────────────────────
+        # For each config axis (level, mode, section_alpha, …), show average metrics
+        # across ALL rows with that dimension value — marginalising over everything else.
+        # Makes it easy to answer "does section_alpha=0.5 beat 0.0 overall?" without
+        # manually filtering the detail sheet.
+        dim_axes    = [c for c in ["level", "mode", "section_alpha", "enhance_query_flag", "use_tiered_years"] if c in df.columns]
+        metric_cols = [c for c in [
+            "evidence_hit", "word_recall", "num_recall",
+            "soft_MRR", "soft_Recall@3", "soft_NDCG@5",
+            "hard_MRR", "hard_Recall@3",
+            "llm_relevance_int", "llm_completeness_int",
+        ] if c in df.columns]
+        dim_frames = []
+        for dim in dim_axes:
+            grp   = df.groupby(dim, dropna=False)
+            agg_m = grp[metric_cols].mean().round(4)
+            agg_m.insert(0, "n_rows", grp.size())
+            agg_m.insert(0, "value",  agg_m.index.astype(str))
+            agg_m.insert(0, "dimension", dim)
+            dim_frames.append(agg_m.reset_index(drop=True))
+        if dim_frames:
+            pd.concat(dim_frames, ignore_index=True).to_excel(
+                writer, sheet_name="dimension_summary", index=False
+            )
 
     print(f"Saved → {out_path}")
 

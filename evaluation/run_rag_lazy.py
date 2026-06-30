@@ -7,6 +7,7 @@ Interface mirrors run_rag.py so configs are interchangeable.
 """
 
 import json
+import re
 from collections import defaultdict
 from itertools import product
 from datetime import datetime
@@ -28,16 +29,34 @@ from evaluation.build_evaluation_dataset import DATASET_PATH, load_dataset
 from db.database import get_qdrant_client
 
 COLLECTIONS = {
-    "--limited --level 1 DENSE": {"coll_name": "--limited --level 1 DENSE", "use_parent_fetch": False},
-    "--limited --level 1 BM25": {"coll_name": "--limited --level 1 BM25", "use_parent_fetch": False},
-    "--limited --level 2 DENSE": {"coll_name": "--limited --level 2 DENSE", "use_parent_fetch": True},
-    "--limited --level 2 BM25": {"coll_name": "--limited --level 2 BM25", "use_parent_fetch": True},
-    "--limited --level 3 DENSE": {"coll_name": "--limited --level 3 DENSE", "use_parent_fetch": True},
-    "--limited --level 3 BM25": {"coll_name": "--limited --level 3 BM25", "use_parent_fetch": True},    
+    "--limited --level 1 DENSE": {
+        "coll_name":      "--limited --level 1 DENSE",
+        "coll_name_bm25": "--limited --level 1 BM25",
+        "use_parent_fetch": False,
+    },
+    "--limited --level 2 DENSE": {
+        "coll_name":      "--limited --level 2 DENSE",
+        "coll_name_bm25": "--limited --level 2 BM25",
+        "use_parent_fetch": True,
+    },
+    "--limited --level 3 DENSE": {
+        "coll_name":      "--limited --level 3 DENSE",
+        "coll_name_bm25": "--limited --level 3 BM25",
+        "use_parent_fetch": True,
+    },
 }
 PARENT_COLL_DENSE = "--limited --level 1 DENSE"
 PARENT_COLL_BM25  = "--limited --level 1 BM25"
 VALID_MODES = {"dense", "sparse", "hybrid"}
+
+_LEVEL_RE = re.compile(r'--level (\d+)\s+(DENSE|BM25)', re.IGNORECASE)
+
+def _short_level(level: str) -> str:
+    """'--limited --level 2 DENSE' → 'L2D',  '--limited --level 1 BM25' → 'L1B'."""
+    m = _LEVEL_RE.search(level)
+    if m:
+        return f"L{m.group(1)}{'D' if m.group(2).upper() == 'DENSE' else 'B'}"
+    return level
 
 
 def _lookup(dataset: pd.DataFrame, finder_id: str, ticker: str, enhance_flag: bool) -> dict:
@@ -129,6 +148,7 @@ def run_evaluation_lazy(
         for level in levels:
             level_cfg        = COLLECTIONS[level]
             coll_name_dense  = level_cfg["coll_name"]
+            coll_name_bm25   = level_cfg["coll_name_bm25"]
             use_parent_fetch = level_cfg["use_parent_fetch"]
 
             dense_results  = None
@@ -144,9 +164,9 @@ def run_evaluation_lazy(
 
             if need_sparse:
                 if is_tiered:
-                    sparse_results = search_bm25_tiered(PARENT_COLL_BM25, query, base_filters, year_val, prefetch_k)
+                    sparse_results = search_bm25_tiered(coll_name_bm25, query, base_filters, year_val, prefetch_k)
                 else:
-                    sparse_results = search_bm25(PARENT_COLL_BM25, query, payload_must=filters, top_k=prefetch_k)
+                    sparse_results = search_bm25(coll_name_bm25, query, payload_must=filters, top_k=prefetch_k)
                 pts = sparse_results.points if hasattr(sparse_results, "points") else []
                 print(f"  [bm25/{level}]  {len(pts)} hits")
 
@@ -163,7 +183,7 @@ def run_evaluation_lazy(
                         )
                     if need_sparse:
                         sec_sparse_results = search_bm25(
-                            PARENT_COLL_BM25, query, payload_must=filters,
+                            coll_name_bm25, query, payload_must=filters,
                             top_k=sec_k, extra_filter=sec_filter,
                         )
 
@@ -346,6 +366,7 @@ def run_multi_evaluation_lazy(
                         is_tiered  = use_tiered and isinstance(year_val, list) and len(year_val) > 1
                         pk         = _prefetch_k_for(enh_flag, level, use_tiered)
                         coll_dense = COLLECTIONS[level]["coll_name"]
+                        coll_bm25  = COLLECTIONS[level]["coll_name_bm25"]
 
                         dense_r  = None
                         sparse_r = None
@@ -355,9 +376,9 @@ def run_multi_evaluation_lazy(
                                        search_with_payload(coll_dense, query_vec, payload_must=filters, top_k=pk))
                             print(f"  [dense/{level}] {len(dense_r.points if hasattr(dense_r,'points') else [])} hits")
                         if need_sparse:
-                            sparse_r = (search_bm25_tiered(PARENT_COLL_BM25, qt, base_filt, year_val, pk)
+                            sparse_r = (search_bm25_tiered(coll_bm25, qt, base_filt, year_val, pk)
                                         if is_tiered else
-                                        search_bm25(PARENT_COLL_BM25, qt, payload_must=filters, top_k=pk))
+                                        search_bm25(coll_bm25, qt, payload_must=filters, top_k=pk))
                             print(f"  [bm25/{level}]  {len(sparse_r.points if hasattr(sparse_r,'points') else [])} hits")
 
                         retrieval_cache[rkey] = {
@@ -387,8 +408,9 @@ def run_multi_evaluation_lazy(
                             pk       = retrieval_cache.get(rkey_ref, {}).get("pk", top_k)
                             sec_k    = max(pk // 2, top_k)
                             coll_dn  = COLLECTIONS[level]["coll_name"]
+                            coll_bm  = COLLECTIONS[level]["coll_name_bm25"]
                             sec_d    = search_with_payload(coll_dn, query_vec, payload_must=filters, top_k=sec_k, extra_filter=sec_filter) if need_dense and query_vec is not None else None
-                            sec_s    = search_bm25(PARENT_COLL_BM25, qt, payload_must=filters, top_k=sec_k, extra_filter=sec_filter) if need_sparse else None
+                            sec_s    = search_bm25(coll_bm, qt, payload_must=filters, top_k=sec_k, extra_filter=sec_filter) if need_sparse else None
                             section_cache[skey] = {"dense": sec_d, "sparse": sec_s}
 
             # Per-config generation
@@ -470,7 +492,7 @@ def run_multi_evaluation_lazy(
                             "enhance_query_flag":  enh_flag,
                             "use_tiered_years":    cfg["use_tiered_years"],
                             "section_alpha":       section_alpha,
-                            "config_key":          f"{level}_{retrieval_mode}_{'ENH' if enh_flag else 'PLAIN'}_{'TIERED' if cfg['use_tiered_years'] else 'FLAT'}_ALPHA{section_alpha}",
+                            "config_key":          f"{_short_level(level)}_{retrieval_mode}_{'ENH' if enh_flag else 'PLAIN'}_{'TIERED' if cfg['use_tiered_years'] else 'FLAT'}_A{section_alpha}",
                             "query":               orig_query,
                             "query_enhanced":      pc["enhanced_query"] if enh_flag else None,
                             "category":            category,
@@ -493,11 +515,12 @@ def run_multi_evaluation_lazy(
     print(f"\n── Multi eval complete ──")
     print(f"  Total rows: {len(all_rows)} | Empty: {n_empty} | Configs: {len(configs)}")
     print(f"  Saved → {out_path}")
+    return out_path
 
 
 def write_config(
     tickers:         list[str],
-    levels:          list[str] = ["header"],
+    levels:          list[str] = ["--limited --level 1 DENSE"],
     retrieval_modes: list[str] = ["hybrid","dense","sparse"],
 ) -> list[dict]:
     """
@@ -520,7 +543,7 @@ def write_config(
         retrieval_modes,
         [True, False],    # enhance_query_flag
         [True, False],    # use_tiered_years
-        [0.0, 0.5, 1.0], # section_alpha: 0=off, 0.5=soft, 1=hard
+        [0.5], # section_alpha: 0=off, 0.5=soft, 1=hard 
     ):
         configs.append({
             "tickers":            [ticker],
@@ -540,17 +563,14 @@ if __name__ == "__main__":
     if dataset.empty:
         raise SystemExit(f"Dataset not found at {DATASET_PATH}. Run build_evaluation_dataset.py first.")
 
+    LEVELS = [
+        "--limited --level 1 DENSE",
+        "--limited --level 2 DENSE",
+        "--limited --level 3 DENSE",
+    ]
     configs = [
-        write_config(
-        tickers=["pypl"],
-        levels=["header","child","enriched"],
-        retrieval_modes=["hybrid","dense","sparse"],
-    ),
-        write_config(
-        tickers=["tsla"],
-        levels=["header","child","enriched"],
-        retrieval_modes=["hybrid","dense","sparse"],
-    )
+        write_config(tickers=["pypl"], levels=LEVELS, retrieval_modes=["hybrid","sparse"]),
+        write_config(tickers=["tsla"], levels=LEVELS, retrieval_modes=["hybrid","sparse"]),
     ]
     print(f"Running {len(configs)} configs...")
 
