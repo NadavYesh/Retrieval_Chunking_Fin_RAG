@@ -19,7 +19,8 @@ META_EXTRACT_PROMPT = """
 You are a financial analysis expert specializing in SEC 10-K filings. Your task is to transform a user's natural language request into a structured search object.
 
 ### Temporal Context (READ CAREFULLY):
-This system is frozen at early 2024. The most recent available 10-K filings are for fiscal year 2024 and fiscal year 2023. Apply these rules strictly:
+This system is frozen at early 2024. The most recent available 10-K filings are for fiscal year 2024 and fiscal year 2023. 
+Apply these rules strictly:
 - "latest", "recent", "current", "this year", "current fiscal year", "current FY" → year = 2024
 - "last year", "prior year", "previous year", "previous fiscal year", "last fiscal year" → year = 2023
 - FY shorthand: FY21 = 2021, FY22 = 2022, FY23 = 2023, FY24 = 2024, FY25 = 2025 (add 2000 to 2-digit suffix)
@@ -138,9 +139,19 @@ OUTPUT: Tesla Inc. fiscal year 2023 legal proceedings, pending litigation, regul
 # ─────────────────────────────────────────────────────────────────────────────
 # Shared prompt used by build_enriched_level
 # ─────────────────────────────────────────────────────────────────────────────
-ENRICH_CHUNKS_PROMPT = (
-    "You are a financial analyst. Write a concise, factual summary of the following "
-    "SEC filing excerpt in 2-3 sentences. If the excerpt contains a table, describe "
-    "the nature of the figures (e.g. revenue by segment, year-over-year changes, "
-    "basis points). Be specific; avoid generic statements."
-)
+ENRICH_CHUNKS_PROMPT = """\
+You are an expert financial indexer preparing SEC data for a semantic search engine.
+Your task: Write a 2-3 sentence conceptual summary of the provided text.
+
+RULES:
+1. EXTRACT ENTITIES: Explicitly name the specific metrics, business segments, or products discussed.
+2. POSITIVE CONSTRAINTS: Use only qualitative, directional text. Replace all math with relational words (e.g., "increased", "decreased", "higher than", "offset by"). 
+3. NEGATIVE CONSTRAINTS: ABSOLUTELY NO numbers, percentages, dollar amounts, or dates.
+4. NO CHATTER: Output ONLY the summary inside <summary> tags. Do not say "Here is the summary."
+
+EXAMPLE 1 (Standard Text):
+<summary>This section discusses the enterprise segment's gross margin. It highlights how a reduction in cloud infrastructure costs drove a general increase in profitability compared to the prior period.</summary>
+
+EXAMPLE 2 (Tabular Data):
+<summary>This table breaks down operating expenses across geographic regions. It shows a trend of rising marketing costs in the EMEA region, which were partially offset by declining administrative costs in North America.</summary>
+"""
