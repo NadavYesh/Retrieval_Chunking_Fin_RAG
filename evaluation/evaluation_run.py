@@ -408,7 +408,10 @@ def analyze_entry(idx: str, data: dict, corpus: pd.DataFrame, fp_index: dict,
     retrieved     = parse_retrieved(retrieved_str)
     retrieved_ids = [s["chunk_id"] for s in retrieved if s["chunk_id"]]
 
-    # ── Score stats (only meaningful for dense; BM25 scores are unbounded) ──
+    # ── Score stats ────────────────────────────────────────────────────────────
+    # After the rrf_fuse fix, hybrid/sparse scores are true RRF scores (rank-based,
+    # bounded by 1/(k+1) per list). Absolute thresholds (LOW_SCORE, SCORE_GAP_SMALL)
+    # still only apply to dense (cosine ∈ [0,1]), but std/gap are meaningful for all.
     scores     = [s["score"] for s in retrieved if s["score"] is not None]
     max_score  = max(scores) if scores else None
     min_score  = min(scores) if scores else None
@@ -1189,7 +1192,7 @@ if __name__ == "__main__":
     USE_LLM_JUDGE = False   # set True to enable Phi-4 judging for all runs
 
     eval_files = [
-        "/Users/nadavsmacbookair/Desktop/Thesis/data/eval_results/eval_multi_TSLA_20260628_1448.json",
+        "/Users/nadavsmacbookair/Desktop/Thesis/data/eval_results/eval_multi_WMT_20260628_1834.json",
     ]
 
     if not eval_files:

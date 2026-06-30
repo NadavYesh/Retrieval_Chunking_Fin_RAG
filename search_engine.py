@@ -139,7 +139,13 @@ def rrf_fuse(dense_results, sparse_results, k: int = 60, top_k: int = 6) -> list
         point_map.setdefault(p.id, p)
 
     sorted_ids = sorted(scores, key=scores.__getitem__, reverse=True)[:top_k]
-    return [point_map[pid] for pid in sorted_ids if pid in point_map]
+    result = []
+    for pid in sorted_ids:
+        if pid in point_map:
+            p = point_map[pid]
+            p.score = scores[pid]
+            result.append(p)
+    return result
 
 
 def rrf_fuse_multi(result_sets: list, k: int = 60, top_k: int = 6) -> list:
@@ -155,7 +161,13 @@ def rrf_fuse_multi(result_sets: list, k: int = 60, top_k: int = 6) -> list:
             scores[p.id] = scores.get(p.id, 0.0) + 1.0 / (k + rank + 1)
             point_map.setdefault(p.id, p)
     sorted_ids = sorted(scores, key=scores.__getitem__, reverse=True)[:top_k]
-    return [point_map[pid] for pid in sorted_ids if pid in point_map]
+    result = []
+    for pid in sorted_ids:
+        if pid in point_map:
+            p = point_map[pid]
+            p.score = scores[pid]
+            result.append(p)
+    return result
 
 
 def _year_weights(years: list[int]) -> list[tuple[int, float]]:
@@ -279,7 +291,7 @@ def search_agent(user_query, model, tokenizer, embed_model, coll_name, ENAHNCE_Q
     """
     messages = [
         {"role": "system", "content": META_EXTRACT_PROMPT},
-        {"role": "user", "content": user_query}
+        {"role": "user", "content": user_query} # instead of embdding the query within the META_EXTRACT_PROMPT
     ]
     
     prompt = tokenizer.apply_chat_template(

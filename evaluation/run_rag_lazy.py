@@ -471,7 +471,7 @@ def run_multi_evaluation_lazy(
 def write_config(
     tickers:         list[str],
     levels:          list[str] = ["header"],
-    retrieval_modes: list[str] = ["hybrid"],
+    retrieval_modes: list[str] = ["hybrid","dense","sparse"],
 ) -> list[dict]:
     """
     Generate all permutations of evaluation configs for the given tickers.
@@ -501,6 +501,10 @@ def write_config(
     return configs
 
 
+
+
+
+
 if __name__ == "__main__":
     from mlx_lm import load
 
@@ -508,20 +512,28 @@ if __name__ == "__main__":
     if dataset.empty:
         raise SystemExit(f"Dataset not found at {DATASET_PATH}. Run build_evaluation_dataset.py first.")
 
-    configs = write_config(
-        tickers=["wmt"],
-        levels=["header"],
-        retrieval_modes=["hybrid"],
-    )
+    configs = [
+        write_config(
+        tickers=["pypl"],
+        levels=["header","child","enriched"],
+        retrieval_modes=["hybrid","dense","sparse"],
+    ),
+        write_config(
+        tickers=["nvda"],
+        levels=["header","child","enriched"],
+        retrieval_modes=["hybrid","dense","sparse"],        
+    )   
+    ]
     print(f"Running {len(configs)} configs...")
 
     print("Loading generation model...")
-    gen_model, gen_tokenizer = load("mlx-community/Llama-3.2-3B-Instruct-4bit")
+    gen_model, gen_tokenizer = load("mlx-community/Qwen3.5-9B-OptiQ-4bit") #changed to Qwen 9B
 
-    run_multi_evaluation_lazy(
-        configs=configs,
-        dataset=dataset,
-        gen_model=gen_model,
-        gen_tokenizer=gen_tokenizer,
-        top_k=5,
-    )
+    for cfg in configs:
+        run_multi_evaluation_lazy(
+            configs=cfg,
+            dataset=dataset,
+            gen_model=gen_model,
+            gen_tokenizer=gen_tokenizer,
+            top_k=5,
+        )

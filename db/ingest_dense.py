@@ -22,10 +22,10 @@ client = get_qdrant_client()
 
 ######################
 # Configuration
-COLL_NAME_DENSE = "--level 1 DENSE"
+COLL_NAME_DENSE = "--level 2 DENSE"
 EMBED_META = False # this is misleading, as the current file embed textual meta.
 import os
-path_ = "/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/chunks/hierarchical/indexed-at-26-06-26/header/batch_2"
+path_ = "/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/chunks/hierarchical/indexed-at-30-06-26/child"
 files = os.listdir(path_)
 files = [f for f in files if f.endswith(".pkl")]
 paths=[os.path.join(path_,f)for f in files]
