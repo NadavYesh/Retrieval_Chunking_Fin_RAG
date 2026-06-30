@@ -6,7 +6,7 @@ import uuid
 import pandas as pd
 import pickle
 import tiktoken
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.append(str(Path(__file__).resolve().parent.parent))
 from prompts import ENRICH_CHUNKS_PROMPT 
 from metadata_extractor import get_meta_sec, sec_metadata
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -99,11 +99,19 @@ def build_child_level(
     child_df = pd.DataFrame([
         {
             "id": str(uuid.uuid4()),
-            "metadata": {**c.metadata, "doc_id": doc_id},
+            "metadata": {k: v for k, v in {**c.metadata, "doc_id": doc_id}.items() if k != "_id"},
             "text": c.page_content,
         }
         for c in child_chunks
     ])
+
+    missing = child_df["metadata"].apply(lambda m: "parent_id" not in m or "doc_id" not in m)
+    if missing.any():
+        raise ValueError(
+            f"{missing.sum()} child chunk(s) are missing parent_id or doc_id. "
+            "Ensure build_header_level ran first and set _id on every header chunk."
+        )
+
     child_df = sec_metadata(child_df, meta)
     return child_df
 
@@ -130,10 +138,10 @@ def build_enriched_level(
                      and 'description' injected into each row's metadata dict.
     """
     from mlx_lm import load, generate as mlx_generate
-
+    import re
     if caption_ is  None:
-        print("Loading phi-4 for chunk enrichment...")
-        model, tokenizer = load("mlx-community/phi-4-4bit")
+        print("Loading Llama for chunk enrichment...")
+        model, tokenizer = load("mlx-community/Llama-3.2-3B-Instruct-4bit")
     # else:
     #     model, tokenizer = caption_
 
@@ -149,7 +157,12 @@ def build_enriched_level(
             messages, tokenize=False, add_generation_prompt=True
         )
         desc = mlx_generate(model, tokenizer, prompt=prompt, max_tokens=150, verbose=False)
-        descriptions.append(desc.strip())
+        # the prompt asks Llama to return <summary> tags
+        match = re.search(r'<summary>(.*?)</summary>',desc.strip())
+        if match:
+            result = match.group(1)
+            desc = result.strip()  # Output: target text        
+        descriptions.append(desc)
         if (i + 1) % 20 == 0 or (i + 1) == n:
             print(f"  Enriched {i + 1}/{n} chunks")
 
@@ -189,8 +202,13 @@ def sec_chunking_pipeline_hierarchical(
     Each level is saved as a separate pickle.
     Pass caption_=(model, tokenizer) when processing multiple files to load once.
     """
-    mk_file = _html_to_md(html_path, MD_PATH)
-    meta    = get_meta_sec(mk_file)
+    if html_path is None:
+        with open(MD_PATH,"r") as f:
+            mk_file = f.read()
+        meta    = get_meta_sec(mk_file)
+    else:
+        mk_file = _html_to_md(html_path, MD_PATH)
+        meta    = get_meta_sec(mk_file)
 
     doc_id  = str(uuid.uuid4())
     doc_df  = None
@@ -228,8 +246,7 @@ def sec_chunking_pipeline_hierarchical(
 #%%
 if __name__ == "__main__":
     RAW_DIR  = "/Users/nadavsmacbookair/Desktop/Thesis/data/html/indexed at 26-6-26/batch_2"
-    RAW_FILES = [f for f in os.listdir(RAW_DIR) if f.endswith(".html")]
-    path_names = [os.path.join(RAW_DIR, f) for f in RAW_FILES]
+    #RAW_FILES = [f for f in os.listdir(RAW_DIR) if f.endswith(".html")]
 
     BUDGET = 400
     enc = tiktoken.encoding_for_model("text-embedding-3-small")
@@ -241,36 +258,43 @@ if __name__ == "__main__":
         length_function=LENGTH_FUNC,
     )
 
-    BASE_CHUNKS = "/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/chunks/hierarchical/indexed-at-26-06-26/header/batch_2"
-    BASE_MD     = "/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/md/indexed-at-26-06-26/batch_2"
+    BASE_CHUNKS = "/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/chunks/hierarchical/indexed-at-30-06-26-limited-with-enriched"
+    BASE_MD     = "/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/md/indexed-at-26-06-26"
 
     # Load phi-4 once for the whole batch (expensive — skip if not running level 3)
-    RUN_ENRICHED = False
+    RUN_ENRICHED = True
+    RUN_FROM_MD = True # if we already have md.x
+    if RUN_FROM_MD: RAW_DIR = BASE_MD
+    TICKERS = ["TSLA"]
+    RAW_FILES = [f for f in os.listdir(RAW_DIR) if f.endswith(".md")]
+    if TICKERS:
+        RAW_FILES = [x for x in RAW_FILES if any(y in x for y in TICKERS)]
+
+    path_names = [os.path.join(RAW_DIR, f) for f in RAW_FILES] 
     caption_ = None
-    if RUN_ENRICHED:
-        from mlx_lm import load
-        print("Loading Llama...")
-        caption_ = load("mlx-community/Llama-3.2-3B-Instruct-4bit")
+    # if RUN_ENRICHED:
+    #     from mlx_lm import load
+    #     print("Loading Llama...")
+    #     caption_ = load("mlx-community/Llama-3.2-3B-Instruct-4bit")
 
     for (path, name) in zip(path_names, RAW_FILES):
-        name        = name[:-5]
+        name        = name[:-3] # make 5 for html
         MD_PATH     = f"{BASE_MD}/{name}.md"
-        #doc_path    = f"{BASE_CHUNKS}/doc/{name}.pkl"
+        doc_path    = f"{BASE_CHUNKS}/doc/{name}.pkl"
         header_path = f"{BASE_CHUNKS}/header/{name}.pkl"
-        #child_path  = f"{BASE_CHUNKS}/child/{name}.pkl"
-        #enriched_path = f"{BASE_CHUNKS}/enriched/{name}.pkl" if RUN_ENRICHED else None
-
+        child_path  = f"{BASE_CHUNKS}/child/{name}.pkl"
+        enriched_path = f"{BASE_CHUNKS}/enriched/{name}.pkl" if RUN_ENRICHED else None
         sec_chunking_pipeline_hierarchical(
-            html_path=path,
-            doc_path=None,
+            html_path=None,
+            doc_path=doc_path,
             header_path=header_path,
-            child_path=None,
+            child_path=child_path,
             MD_PATH=MD_PATH,
             budget=BUDGET,
             length_function=LENGTH_FUNC,
             char_splitter=CHAR_SPLITTER,
-            #enriched_path=enriched_path,
-            #caption_=caption_,
+            enriched_path=enriched_path,
+            caption_=caption_,
         )
 
 
