@@ -388,7 +388,7 @@ def analyze_entry(idx: str, data: dict, corpus: pd.DataFrame, fp_index: dict,
     config_key           = data.get("config_key",           {}).get(idx)
     enhance_query_flag   = data.get("enhance_query_flag",   {}).get(idx)
     use_tiered_years     = data.get("use_tiered_years",     {}).get(idx)
-    use_section_routing  = data.get("use_section_routing",  {}).get(idx)
+    section_alpha        = data.get("section_alpha",         {}).get(idx)
     ticker_filter        = data.get("ticker_filter",        {}).get(idx)
 
     if isinstance(truth_refs, str):
@@ -531,7 +531,7 @@ def analyze_entry(idx: str, data: dict, corpus: pd.DataFrame, fp_index: dict,
         "config_key":          config_key,
         "enhance_query_flag":  enhance_query_flag,
         "use_tiered_years":    use_tiered_years,
-        "use_section_routing": use_section_routing,
+        "section_alpha":       section_alpha,
         "ticker_filter":       ticker_filter,
         # ── Retrieval quality ──
         "n_retrieved":         n_retrieved_total,
@@ -969,7 +969,7 @@ def _write_multi_excel(rows_df: pd.DataFrame, out_path: Path) -> None:
 
     # ── Boolean/int casts for numeric aggregation ──────────────────────────
     df = rows_df.copy()
-    for col in ("enhance_query_flag", "use_tiered_years", "use_section_routing", "year_is_multi",
+    for col in ("enhance_query_flag", "use_tiered_years", "year_is_multi",
                 "evidence_hit", "answer_has_number"):
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -988,6 +988,8 @@ def _write_multi_excel(rows_df: pd.DataFrame, out_path: Path) -> None:
         agg_dict: dict = {
             "finder_id": "count",
             "evidence_hit": "mean",
+            "word_recall": "mean",
+            "num_recall": "mean",
             "soft_MRR": "mean",
             "soft_Recall@3": "mean",
             "soft_NDCG@5": "mean",
@@ -1001,7 +1003,7 @@ def _write_multi_excel(rows_df: pd.DataFrame, out_path: Path) -> None:
         for col in ("llm_relevance_int", "llm_completeness_int"):
             if col in df.columns:
                 agg_dict[col] = "mean"
-        for col in ("enhance_query_flag", "use_tiered_years", "use_section_routing"):
+        for col in ("enhance_query_flag", "use_tiered_years", "section_alpha"):
             if col in df.columns:
                 agg_dict[col] = "first"
 
@@ -1037,7 +1039,7 @@ def _write_multi_excel(rows_df: pd.DataFrame, out_path: Path) -> None:
         # ── Sheet 5: correlations ────────────────────────────────────────────
         corr_cols = [c for c in [
             "query_length", "year_is_multi", "n_retrieved", "score_std",
-            "enhance_query_flag", "use_tiered_years", "use_section_routing",
+            "enhance_query_flag", "use_tiered_years", "section_alpha",
             "llm_relevance_int", "llm_completeness_int",
             "evidence_hit", "soft_MRR", "soft_Recall@3", "soft_NDCG@5",
             "hard_MRR", "hard_Recall@3",
@@ -1123,7 +1125,8 @@ def _print_multi_summary(df: pd.DataFrame) -> None:
         if col in df.columns:
             df[col + "_int"] = (df[col] == "YES").astype(float)
 
-    agg: dict = {"finder_id": "count", "evidence_hit": "mean", "soft_MRR": "mean", "soft_Recall@3": "mean"}
+    agg: dict = {"finder_id": "count", "evidence_hit": "mean", "word_recall": "mean",
+                 "num_recall": "mean", "soft_MRR": "mean", "soft_Recall@3": "mean"}
     for c in ("llm_relevance_int", "llm_completeness_int"):
         if c in df.columns:
             agg[c] = "mean"
@@ -1132,15 +1135,17 @@ def _print_multi_summary(df: pd.DataFrame) -> None:
     sort_col = "llm_relevance_int" if "llm_relevance_int" in ranked else "evidence_hit"
     ranked = ranked.sort_values(sort_col, ascending=False)
 
-    print(f"\n{'config_key':<55} {'n':>4}  {'llm_rel%':>8}  {'llm_comp%':>9}  {'soft_MRR':>8}  {'Recall@3':>8}  {'evi_hit%':>8}")
-    print("─" * 110)
+    print(f"\n{'config_key':<55} {'n':>4}  {'llm_rel%':>8}  {'llm_comp%':>9}  {'soft_MRR':>8}  {'Recall@3':>8}  {'evi_hit%':>8}  {'word_rec':>8}  {'num_rec':>7}")
+    print("─" * 125)
     for _, r in ranked.iterrows():
         rel  = f"{r.get('llm_relevance_int', float('nan'))*100:.1f}" if "llm_relevance_int" in r and pd.notna(r.get("llm_relevance_int")) else "  n/a"
         comp = f"{r.get('llm_completeness_int', float('nan'))*100:.1f}" if "llm_completeness_int" in r and pd.notna(r.get("llm_completeness_int")) else "  n/a"
         mrr  = f"{r['soft_MRR']:.3f}" if pd.notna(r.get("soft_MRR")) else "  n/a"
         rc3  = f"{r.get('soft_Recall@3', float('nan')):.3f}" if pd.notna(r.get("soft_Recall@3")) else "  n/a"
         hit  = f"{r['evidence_hit']*100:.1f}" if pd.notna(r.get("evidence_hit")) else "  n/a"
-        print(f"  {str(r[group_col]):<53} {int(r['n']):>4}  {rel:>8}  {comp:>9}  {mrr:>8}  {rc3:>8}  {hit:>8}")
+        wr   = f"{r['word_recall']:.3f}" if pd.notna(r.get("word_recall")) else "  n/a"
+        nr   = f"{r['num_recall']:.3f}" if pd.notna(r.get("num_recall")) else "  n/a"
+        print(f"  {str(r[group_col]):<53} {int(r['n']):>4}  {rel:>8}  {comp:>9}  {mrr:>8}  {rc3:>8}  {hit:>8}  {wr:>8}  {nr:>7}")
 
     if "category" in df.columns and "llm_relevance" in df.columns:
         fail = df[df["llm_relevance"] == "NO"]

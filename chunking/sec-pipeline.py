@@ -265,7 +265,7 @@ if __name__ == "__main__":
     RUN_ENRICHED = True
     RUN_FROM_MD = True # if we already have md.x
     if RUN_FROM_MD: RAW_DIR = BASE_MD
-    TICKERS = ["TSLA"]
+    TICKERS = ["PYPL"]
     RAW_FILES = [f for f in os.listdir(RAW_DIR) if f.endswith(".md")]
     if TICKERS:
         RAW_FILES = [x for x in RAW_FILES if any(y in x for y in TICKERS)]
