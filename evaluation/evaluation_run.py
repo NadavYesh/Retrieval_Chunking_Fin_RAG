@@ -45,7 +45,7 @@ from evaluation_functions import score_row
 # disabled because we run in batches.
 # EVAL_FILE  = Path("/Users/nadavsmacbookair/Desktop/Thesis/data/eval_results/WMT_eval_20260626_1603.json")
 
-CHUNKS_DIR = Path("/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/chunks/hierarchical/indexed-at-26-06-26/header")
+CHUNKS_DIR = Path("/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/chunks/hierarchical/indexed-at-30-06-26-limited-with-enriched/header")
 
 LOW_SCORE_THRESH      = 0.60   # cosine similarity threshold — only meaningful for dense mode
 SCORE_GAP_THRESH      = 0.03   # min gap between best and worst retrieved score; small gap = undiscriminated results
@@ -392,6 +392,13 @@ def analyze_entry(idx: str, data: dict, corpus: pd.DataFrame, fp_index: dict,
     ticker_filter        = data.get("ticker_filter",        {}).get(idx)
     level                = data.get("level",                {}).get(idx)
 
+    # ── Clean / human-readable config labels ──────────────────────────────────
+    _lm       = re.search(r"level (\d)", str(level or ""), re.IGNORECASE) or \
+                re.search(r"L(\d)",      str(config_key or ""))
+    level_num = int(_lm.group(1)) if _lm else None
+    enhanced  = ("YES" if enhance_query_flag else "NO") if enhance_query_flag is not None else None
+    tiered    = ("YES" if use_tiered_years   else "NO") if use_tiered_years   is not None else None
+
     if isinstance(truth_refs, str):
         try:
             parsed = json.loads(truth_refs)
@@ -533,6 +540,10 @@ def analyze_entry(idx: str, data: dict, corpus: pd.DataFrame, fp_index: dict,
         # ── Config columns (None for old-format JSONs) ──
         "config_key":          config_key,
         "level":               level,
+        "level_num":           level_num,    # 1=header, 2=child, 3=enriched
+        "enhanced":            enhanced,     # YES / NO
+        "tiered":              tiered,       # YES / NO
+        "alpha":               section_alpha,
         "enhance_query_flag":  enhance_query_flag,
         "use_tiered_years":    use_tiered_years,
         "section_alpha":       section_alpha,
@@ -973,6 +984,9 @@ def _write_multi_excel(rows_df: pd.DataFrame, out_path: Path) -> None:
 
     # ── Boolean/int casts for numeric aggregation ──────────────────────────
     df = rows_df.copy()
+    # Cast all bool-dtype columns to int first (pd.to_numeric silently no-ops on bool)
+    for col in df.select_dtypes(include="bool").columns:
+        df[col] = df[col].astype(int)
     for col in ("enhance_query_flag", "use_tiered_years", "year_is_multi",
                 "evidence_hit", "answer_has_number"):
         if col in df.columns:
@@ -1077,6 +1091,11 @@ def _write_multi_excel(rows_df: pd.DataFrame, out_path: Path) -> None:
                 writer, sheet_name="dimension_summary", index=False
             )
 
+        # ── Sheet 7: baseline_comparison ─────────────────────────────────────
+        bc_df, _ = _build_delta_df(df, group_col)
+        if not bc_df.empty:
+            bc_df.to_excel(writer, sheet_name="baseline_comparison", index=False)
+
     print(f"Saved → {out_path}")
 
 
@@ -1134,6 +1153,7 @@ def run_multi_analysis(
     print(f"Saved → {out_pkl}")
 
     _print_multi_summary(rows_df)
+    _print_baseline_delta_summary(rows_df)
     return rows_df
 
 
@@ -1190,6 +1210,248 @@ def _print_multi_summary(df: pd.DataFrame) -> None:
         print(f"\nHard eval coverage: {len(hard_rows)}/{n} rows have truth chunk(s) in corpus")
 
 
+# ── Baseline-delta comparison ─────────────────────────────────────────────────
+#
+# Baseline = Level 1 | sparse/BM25 retrieval | section_alpha=0 | tiered=False
+# Every other config is shown as an incremental gain/loss vs this reference point.
+#
+# Metric columns in the comparison table: (df_column, display_label, format_spec)
+_CMP_METRICS: list[tuple[str, str, str]] = [
+    ("evidence_hit",         "evi_hit", ".3f"),
+    ("word_recall",          "wrd_rec", ".3f"),
+    ("num_recall",           "num_rec", ".3f"),
+    ("soft_MRR",             "sft_MRR", ".3f"),
+    ("soft_Recall@3",        "R@3",     ".3f"),
+    ("soft_NDCG@5",          "NDCG@5",  ".3f"),
+    ("hard_MRR",             "hrd_MRR", ".3f"),
+    ("llm_relevance_int",    "llm_rel", ".3f"),
+    ("llm_completeness_int", "llm_cmp", ".3f"),
+]
+
+
+def _find_baseline_cfg(df: pd.DataFrame, group_col: str) -> str | None:
+    """
+    Return the config_key that represents the baseline.
+
+    Hard requirements: section_alpha=0 AND use_tiered_years=False (FLAT).
+    Tiebreaker (preference order): level 1 first, then sparse/BM25 mode.
+    Falls back to the config with the lowest evidence_hit mean.
+    """
+    candidates = []
+    for cfg, grp in df.groupby(group_col, dropna=False):
+        r = grp.iloc[0]
+        alpha_ok   = float(r.get("section_alpha") or 0) == 0.0
+        tiered_ok  = not bool(pd.to_numeric(r.get("use_tiered_years",   0) or 0, errors="coerce"))
+        enhance_ok = not bool(pd.to_numeric(r.get("enhance_query_flag", 0) or 0, errors="coerce"))
+        if not (alpha_ok and tiered_ok and enhance_ok):
+            continue
+        is_l1     = ("level 1" in str(r.get("level", "") or "").lower()
+                     or str(cfg or "").upper().startswith("L1"))
+        is_sparse = str(r.get("mode", "") or "").lower() in ("sparse", "bm25")
+        candidates.append((cfg, is_l1, is_sparse))
+
+    if candidates:
+        # sort so level-1 comes first, then sparse, then anything else
+        best = sorted(candidates, key=lambda x: (not x[1], not x[2]))[0]
+        return str(best[0])
+
+    # fallback: lowest-performing config
+    if "evidence_hit" in df.columns:
+        agg = df.groupby(group_col, dropna=False)["evidence_hit"].apply(
+            lambda s: pd.to_numeric(s, errors="coerce").mean()
+        )
+        return str(agg.idxmin())
+    return None
+
+
+def _build_delta_df(df: pd.DataFrame, group_col: str) -> tuple[pd.DataFrame, str | None]:
+    """
+    Aggregate per-config means and attach a Δ_<metric> column for each metric
+    showing the difference vs the baseline config.
+
+    Returns (comparison_df, baseline_config_key).
+    """
+    df = df.copy()
+    for col in ("evidence_hit", "use_tiered_years", "enhance_query_flag", "section_alpha"):
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    for col in ("llm_relevance", "llm_completeness"):
+        if col in df.columns:
+            df[col + "_int"] = (df[col] == "YES").astype(float)
+
+    present = [col for col, _, _ in _CMP_METRICS if col in df.columns]
+    if not present:
+        return pd.DataFrame(), None
+
+    agg   = df.groupby(group_col, dropna=False)[present].mean().round(4)
+    n_map = df.groupby(group_col, dropna=False).size()
+
+    baseline_cfg = _find_baseline_cfg(df, group_col)
+    if baseline_cfg is None or baseline_cfg not in agg.index:
+        return agg.reset_index(), None
+
+    base_row = agg.loc[baseline_cfg]
+    rows = []
+    for cfg in agg.index:
+        row = agg.loc[cfg]
+        rec: dict = {group_col: str(cfg), "is_baseline": (cfg == baseline_cfg), "n": int(n_map[cfg])}
+        for col in present:
+            bv = base_row[col]
+            v  = row[col]
+            rec[col]        = v
+            rec[f"Δ_{col}"] = round(float(v - bv), 4) if (pd.notna(v) and pd.notna(bv)) else None
+        rows.append(rec)
+
+    result   = pd.DataFrame(rows)
+    sort_col = next((c for c in ["llm_relevance_int", "evidence_hit", "soft_MRR"] if c in result.columns), None)
+    if sort_col:
+        result = result.sort_values(sort_col, ascending=False, ignore_index=True)
+    return result, baseline_cfg
+
+
+def _delta_str(delta, fmt: str = ".3f") -> str:
+    """Format a numeric delta with sign and directional arrow (↑ ↓ →)."""
+    if delta is None or (isinstance(delta, float) and math.isnan(delta)):
+        return "   n/a"
+    sign  = "+" if delta >= 0 else ""
+    arrow = "↑" if delta >= 0.05 else ("↓" if delta <= -0.05 else "→")
+    return f"{sign}{delta:{fmt}}{arrow}"
+
+
+# Axes used to determine which single factor changed vs baseline
+_AXIS_COLS  = ["level", "mode", "enhance_query_flag", "use_tiered_years", "section_alpha"]
+_AXIS_LABEL = {
+    "level":              "LEVEL",
+    "mode":               "RETRIEVAL MODE",
+    "enhance_query_flag": "QUERY ENHANCEMENT",
+    "use_tiered_years":   "TIERED YEAR FILTER",
+    "section_alpha":      "SECTION ROUTING (alpha)",
+}
+
+
+def _norm_axis(v) -> str:
+    """Canonical string for axis-value comparison (handles bool/int/float/str)."""
+    if v is None or (isinstance(v, float) and math.isnan(v)):
+        return "none"
+    try:
+        f = float(v)
+        return str(int(f)) if f == int(f) else f"{f:.2f}"
+    except (TypeError, ValueError):
+        return str(v).strip().lower()
+
+
+def _print_baseline_delta_summary(df: pd.DataFrame) -> None:
+    """
+    Print incremental config impact grouped by which single axis changed vs baseline.
+
+    Baseline = alpha=0, tiered=False (+ level 1 and sparse as tiebreakers).
+    Configs differing on exactly ONE axis are shown under that axis header.
+    Multi-axis combos are listed separately at the bottom.
+    Arrow legend: ↑ ≥ +0.05   → within ±0.05   ↓ ≤ −0.05
+    """
+    group_col = "config_key" if "config_key" in df.columns and df["config_key"].notna().any() else "mode"
+    delta_df, baseline_cfg = _build_delta_df(df, group_col)
+    if delta_df.empty:
+        return
+
+    present = [(col, lbl, fmt) for col, lbl, fmt in _CMP_METRICS if col in df.columns]
+    if not present:
+        return
+
+    # ── Metadata lookup: config_key → first row (for axis comparison) ────────
+    first_rows: dict[str, pd.Series] = {
+        str(cfg): grp.iloc[0]
+        for cfg, grp in df.groupby(group_col, dropna=False)
+    }
+    base_meta = first_rows.get(str(baseline_cfg), pd.Series())
+
+    # ── Categorise each config by how many axes differ from baseline ──────────
+    axis_buckets: dict[str, list] = {ax: [] for ax in _AXIS_COLS}
+    multi_axis:   list            = []
+
+    for _, row in delta_df.iterrows():
+        if row["is_baseline"]:
+            continue
+        cfg_str = str(row[group_col])
+        meta    = first_rows.get(cfg_str, pd.Series())
+        changed = [
+            ax for ax in _AXIS_COLS
+            if _norm_axis(base_meta.get(ax)) != _norm_axis(meta.get(ax))
+        ]
+        if len(changed) == 1:
+            axis_buckets[changed[0]].append(row)
+        else:
+            multi_axis.append(row)
+
+    # ── Layout helpers ────────────────────────────────────────────────────────
+    cfg_w   = min(52, max(len(str(c)) for c in delta_df[group_col]) + 2)
+    col_w   = 15
+    divider = "  " + "─" * (cfg_w + 6 + len(present) * col_w)
+    hdr_row = f"  {'config':<{cfg_w}}  {'n':>4}" + "".join(
+        f"  {lbl:>5}  {'Δ':>6}" for _, lbl, _ in present
+    )
+
+    def _fmt_row(row, is_base=False):
+        marker = "►" if is_base else " "
+        line   = f" {marker} {str(row[group_col]):<{cfg_w}}  {int(row['n']):>4}"
+        for col, _, fmt in present:
+            v     = row.get(col)
+            d     = row.get(f"Δ_{col}")
+            v_str = f"{v:{fmt}}" if pd.notna(v) else "  n/a"
+            d_str = "  base" if is_base else _delta_str(d, fmt)
+            line += f"  {v_str:>5}  {d_str:>6}"
+        return line
+
+    # ── Baseline banner ───────────────────────────────────────────────────────
+    W = 110
+    base_row   = delta_df[delta_df["is_baseline"]].iloc[0] if delta_df["is_baseline"].any() else None
+    auto_note  = "" if str(baseline_cfg) in df[group_col].astype(str).values else " (auto-selected)"
+    print("\n" + "╔" + "═" * (W - 2) + "╗")
+    banner = f"  BASELINE{auto_note}: {baseline_cfg}"
+    if base_row is not None:
+        parts = [
+            f"{lbl}={base_row.get(col):{fmt}}" if pd.notna(base_row.get(col)) else f"{lbl}=n/a"
+            for col, lbl, fmt in present
+        ]
+        banner += "   │   " + "  │  ".join(parts)
+    print(f"║{banner:<{W-2}}║")
+    print("╚" + "═" * (W - 2) + "╝")
+
+    # ── One section per axis ──────────────────────────────────────────────────
+    print("\n  ONE-AXIS IMPACT vs BASELINE")
+    any_printed = False
+    for axis in _AXIS_COLS:
+        rows = axis_buckets[axis]
+        if not rows:
+            continue
+        any_printed = True
+        label = _AXIS_LABEL[axis]
+        print(f"\n  ── {label} {'─' * max(1, 44 - len(label))}")
+        print(hdr_row)
+        print(divider)
+        if base_row is not None:
+            print(_fmt_row(base_row, is_base=True))
+        for r in sorted(rows, key=lambda r: -float(r.get("evidence_hit") or 0)):
+            print(_fmt_row(r))
+        print(divider)
+
+    if not any_printed:
+        print("  (no single-axis neighbours found — run the 6 missing configs first)")
+
+    # ── Multi-axis combos ─────────────────────────────────────────────────────
+    if multi_axis:
+        print(f"\n  ── MULTI-AXIS COMBOS {'─' * 24}")
+        print(hdr_row)
+        print(divider)
+        if base_row is not None:
+            print(_fmt_row(base_row, is_base=True))
+        for r in sorted(multi_axis, key=lambda r: -float(r.get("evidence_hit") or 0)):
+            print(_fmt_row(r))
+        print(divider)
+
+    print("  ↑ ≥ +0.05   → within ±0.05   ↓ ≤ −0.05\n")
+
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
@@ -1226,7 +1488,7 @@ if __name__ == "__main__":
     USE_LLM_JUDGE = False   # set True to enable Phi-4 judging for all runs
 
     eval_files = [
-        "/Users/nadavsmacbookair/Desktop/Thesis/data/eval_results/eval_multi_WMT_20260628_1834.json",
+        "/Users/nadavsmacbookair/Desktop/Thesis/data/eval_results/eval_multi_PYPL-TSLA_20260701_1243.json",
     ]
 
     if not eval_files:

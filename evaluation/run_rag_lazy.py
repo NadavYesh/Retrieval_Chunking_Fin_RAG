@@ -231,8 +231,12 @@ def run_evaluation_lazy(
                         rag_answer = "No relevant context retrieved."
                     else:
                         wrapped    = SimpleNamespace(points=context_points)
-                        rag_answer, _ = generate_llm_answer(meta["optimized_query"], wrapped, gen_model, gen_tokenizer)
-                        print(f"    [gen] {len(rag_answer)} chars: {rag_answer[:80].strip()}...")
+                        if gen_model:
+                            rag_answer, _ = generate_llm_answer(meta["optimized_query"], wrapped, gen_model, gen_tokenizer)
+                            print(f"    [gen] {len(rag_answer)} chars: {rag_answer[:80].strip()}...")
+                        else:
+                            rag_answer = " NO GENERATED ANSWER "
+
 
                 except Exception as e:
                     print(f"    [ERROR] {retrieval_mode}: {e}")
@@ -520,8 +524,8 @@ def run_multi_evaluation_lazy(
 
 def write_config(
     tickers:         list[str],
-    levels:          list[str] = ["--limited --level 1 DENSE"],
-    retrieval_modes: list[str] = ["hybrid","dense","sparse"],
+    levels:          list[str] = None,
+    retrieval_modes: list[str] = None,
 ) -> list[dict]:
     """
     Generate all permutations of evaluation configs for the given tickers.
@@ -536,14 +540,19 @@ def write_config(
       0.5 → soft routing (equal-weight blend of Track A and Track B)
       1.0 → hard routing (Track A only)
     """
+    if levels is None:
+        levels = list(COLLECTIONS.keys())
+    if retrieval_modes is None:
+        retrieval_modes = ["hybrid", "dense", "sparse"]
+
     configs = []
     for ticker, level, mode, enhance, tiered, alpha in product(
         tickers,
         levels,
         retrieval_modes,
-        [True, False],    # enhance_query_flag
-        [True, False],    # use_tiered_years
-        [0.5], # section_alpha: 0=off, 0.5=soft, 1=hard 
+        [False, True],      # enhance_query_flag
+        [False, True],      # use_tiered_years
+        [0.0, 0.5, 1.0],    # section_alpha: 0=off, 0.5=soft, 1=hard
     ):
         configs.append({
             "tickers":            [ticker],
