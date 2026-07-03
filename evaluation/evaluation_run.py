@@ -418,6 +418,13 @@ def analyze_entry(idx: str, data: dict, corpus: pd.DataFrame, fp_index: dict,
     retrieved     = parse_retrieved(retrieved_str)
     retrieved_ids = [s["chunk_id"] for s in retrieved if s["chunk_id"]]
 
+    # Most common SEC section among retrieved chunks (for section routing analysis)
+    _sec_counts: dict[str, int] = {}
+    for s in retrieved:
+        sec = s.get("section") or "unknown"
+        _sec_counts[sec] = _sec_counts.get(sec, 0) + 1
+    top_section = max(_sec_counts, key=_sec_counts.get) if _sec_counts else None
+
     # ── Score stats ────────────────────────────────────────────────────────────
     # After the rrf_fuse fix, hybrid/sparse scores are true RRF scores (rank-based,
     # bounded by 1/(k+1) per list). Absolute thresholds (LOW_SCORE, SCORE_GAP_SMALL)
@@ -559,6 +566,7 @@ def analyze_entry(idx: str, data: dict, corpus: pd.DataFrame, fp_index: dict,
         "year_precision":      year_precision,
         "ticker_precision":    ticker_precision,
         "n_unique_sections":   n_unique_sections,
+        "top_section":         top_section,
         # ── Filter leakage counts ──
         "n_wrong_ticker":      n_wrong_ticker,
         "n_wrong_year":        n_wrong_year,
@@ -1096,6 +1104,12 @@ def _write_multi_excel(rows_df: pd.DataFrame, out_path: Path) -> None:
         if not bc_df.empty:
             bc_df.to_excel(writer, sheet_name="baseline_comparison", index=False)
 
+        # ── Sheet 8: axis_x_category ──────────────────────────────────────────
+        _write_axis_category_sheet(df, writer)
+
+        # ── Sheet 9: section_routing ──────────────────────────────────────────
+        _write_section_routing_sheet(df, writer)
+
     print(f"Saved → {out_path}")
 
 
@@ -1450,6 +1464,256 @@ def _print_baseline_delta_summary(df: pd.DataFrame) -> None:
         print(divider)
 
     print("  ↑ ≥ +0.05   → within ±0.05   ↓ ≤ −0.05\n")
+
+
+# ── Axis × Category impact ────────────────────────────────────────────────────
+#
+# Sheets 8 & 9: cross-tabulate config axes (and retrieved SEC sections) against
+# query categories to reveal which categories benefit from each axis change.
+#
+# Metrics: evidence_hit, word_recall, num_recall, soft_MRR, soft_NDCG@5, soft_Recall@3
+# Δ column: binary axes → signed (other − baseline); 3-value axes → max − min range.
+
+_AX_CAT_METRICS: list[tuple[str, str]] = [
+    ("evidence_hit",  "evi_hit"),
+    ("word_recall",   "wrd_rec"),
+    ("num_recall",    "num_rec"),
+    ("soft_MRR",      "sft_MRR"),
+    ("soft_NDCG@5",   "NDCG@5"),
+    ("soft_Recall@3", "R@3"),
+]
+
+# Baseline value per axis (normalised string, used to determine Δ direction)
+_AX_BASELINE_NORM: dict[str, str] = {
+    "use_tiered_years":   "0",
+    "enhance_query_flag": "0",
+    "section_alpha":      "0",
+    "mode":               "sparse",
+    # "level" handled via substring match in _is_ax_baseline
+}
+
+
+def _ax_val_label(axis: str, v) -> str:
+    """Human-readable column header for one axis value."""
+    if axis == "use_tiered_years":
+        return "TIERED" if pd.notna(v) and float(v or 0) else "FLAT"
+    if axis == "enhance_query_flag":
+        return "ENH" if pd.notna(v) and float(v or 0) else "PLAIN"
+    if axis == "section_alpha":
+        return f"α={float(v or 0):.2f}"
+    if axis == "level":
+        m = re.search(r"\d", str(v or ""))
+        return f"L{m.group()}" if m else str(v)
+    return str(v).lower() if pd.notna(v) else "none"
+
+
+def _is_ax_baseline(axis: str, v) -> bool:
+    """True if v is the reference/baseline value for this axis."""
+    n = _norm_axis(v)
+    if axis == "level":
+        return "level 1" in n or n.startswith("l1")
+    b = _AX_BASELINE_NORM.get(axis)
+    return n == b if b is not None else False
+
+
+def _axis_category_block(
+    df: pd.DataFrame,
+    axis: str,
+    present_metrics: list[tuple[str, str]],
+) -> "pd.DataFrame | None":
+    """
+    Wide comparison table: rows = categories + OVERALL, columns = per-axis-value
+    metrics + Δ_<metric> vs the baseline axis value.
+
+    Returns None when axis is absent or has < 2 unique values.
+    """
+    if axis not in df.columns or "category" not in df.columns:
+        return None
+
+    ax = df[axis].copy()
+    if axis in ("use_tiered_years", "enhance_query_flag", "section_alpha"):
+        ax = pd.to_numeric(ax, errors="coerce")
+
+    unique_vals = sorted(ax.dropna().unique(), key=lambda v: _norm_axis(v))
+    if len(unique_vals) < 2:
+        return None
+
+    val_labels = [_ax_val_label(axis, v) for v in unique_vals]
+    bline_lbl  = next(
+        (lbl for v, lbl in zip(unique_vals, val_labels) if _is_ax_baseline(axis, v)),
+        val_labels[0],
+    )
+
+    categories = sorted(df["category"].dropna().unique())
+    records: list[dict] = []
+
+    for cat in list(categories) + ["OVERALL"]:
+        mask_cat = (df["category"] == cat) if cat != "OVERALL" else pd.Series(True, index=df.index)
+        rec: dict = {"category": cat}
+        val_avgs: dict[str, dict[str, float]] = {}
+
+        for v, vlbl in zip(unique_vals, val_labels):
+            sub = df[mask_cat & (ax == v)]
+            rec[f"n_{vlbl}"] = len(sub)
+            avgs: dict[str, float] = {}
+            for col, mlbl in present_metrics:
+                avg = pd.to_numeric(sub[col], errors="coerce").mean()
+                rec[f"{mlbl}_{vlbl}"] = round(float(avg), 4) if pd.notna(avg) else None
+                avgs[mlbl] = float(avg) if pd.notna(avg) else float("nan")
+            val_avgs[vlbl] = avgs
+
+        # Δ vs baseline value
+        for _, mlbl in present_metrics:
+            base_v = val_avgs.get(bline_lbl, {}).get(mlbl, float("nan"))
+            if len(val_labels) == 2:
+                other_lbl = next(l for l in val_labels if l != bline_lbl)
+                other_v   = val_avgs.get(other_lbl, {}).get(mlbl, float("nan"))
+                rec[f"Δ_{mlbl}"] = (
+                    round(other_v - base_v, 4)
+                    if math.isfinite(base_v) and math.isfinite(other_v) else None
+                )
+            else:
+                valid = [
+                    val_avgs[l].get(mlbl, float("nan"))
+                    for l in val_labels
+                    if math.isfinite(val_avgs[l].get(mlbl, float("nan")))
+                ]
+                rec[f"Δ_{mlbl}"] = round(max(valid) - min(valid), 4) if len(valid) >= 2 else None
+
+        records.append(rec)
+
+    block = pd.DataFrame(records)
+    return pd.concat(
+        [block[block["category"] != "OVERALL"], block[block["category"] == "OVERALL"]],
+        ignore_index=True,
+    )
+
+
+def _write_axis_category_sheet(df: pd.DataFrame, writer: "pd.ExcelWriter") -> None:
+    """
+    Sheet 8: axis_x_category
+    Five stacked blocks, one per config axis, showing mean retrieval metrics
+    per (axis_value × query_category). Δ columns show signed change vs baseline
+    axis value (binary axes) or max-min range (multi-value axes).
+    """
+    present = [(col, lbl) for col, lbl in _AX_CAT_METRICS if col in df.columns]
+    if not present:
+        return
+
+    all_frames: list[pd.DataFrame] = []
+    spacer = pd.DataFrame([{"category": ""}, {"category": ""}])
+
+    for axis in _AXIS_COLS:
+        block = _axis_category_block(df, axis, present)
+        if block is None or block.empty:
+            continue
+        title = pd.DataFrame([{"category": f"── {_AXIS_LABEL[axis]} ──"}])
+        if all_frames:
+            all_frames.append(spacer)
+        all_frames.extend([title, block])
+
+    if not all_frames:
+        return
+
+    pd.concat(all_frames, ignore_index=True).to_excel(
+        writer, sheet_name="axis_x_category", index=False
+    )
+
+
+def _write_section_routing_sheet(df: pd.DataFrame, writer: "pd.ExcelWriter") -> None:
+    """
+    Sheet 9: section_routing
+    Part 1 – Retrieved section × category: for each query category, which SEC
+              document sections (Item 7, Item 1A, …) are retrieved, and how
+              well does retrieval score for each section.
+    Part 2 – Section routing impact: (when section_alpha varies) compare which
+              sections are retrieved at α=0 vs α>0, and whether routing shifts
+              the section distribution towards better-scoring sections.
+    """
+    if "top_section" not in df.columns or "category" not in df.columns:
+        return
+
+    categories = sorted(df["category"].dropna().unique())
+    top_secs   = df["top_section"].dropna().value_counts().head(8).index.tolist()
+    if not top_secs:
+        return
+
+    # ── Part 1: retrieved section × category performance ─────────────────────
+    p1_rows: list[dict] = []
+    for cat in list(categories) + ["OVERALL"]:
+        sub = df if cat == "OVERALL" else df[df["category"] == cat]
+        n_total = len(sub)
+        rec: dict = {"category": cat, "total_n": n_total}
+
+        for sec in top_secs + ["OTHER"]:
+            sub_sec = sub[sub["top_section"] == sec] if sec != "OTHER" else sub[~sub["top_section"].isin(top_secs)]
+            n = len(sub_sec)
+            rec[f"n_{sec}"]   = n
+            rec[f"pct_{sec}"] = round(n / n_total * 100, 1) if n_total else None
+            evi = pd.to_numeric(sub_sec["evidence_hit"], errors="coerce").mean()
+            rec[f"evi_{sec}"] = round(float(evi), 3) if pd.notna(evi) else None
+            if "soft_MRR" in df.columns:
+                mrr = pd.to_numeric(sub_sec["soft_MRR"], errors="coerce").mean()
+                rec[f"mrr_{sec}"] = round(float(mrr), 3) if pd.notna(mrr) else None
+
+        p1_rows.append(rec)
+
+    part1_df = pd.DataFrame(p1_rows)
+
+    # ── Part 2: section alpha routing impact ──────────────────────────────────
+    part2_df = None
+    if "section_alpha" in df.columns:
+        alphas = sorted(
+            pd.to_numeric(df["section_alpha"], errors="coerce").dropna().unique()
+        )
+        if len(alphas) >= 2:
+            present = [(col, lbl) for col, lbl in _AX_CAT_METRICS if col in df.columns]
+            p2_rows: list[dict] = []
+
+            for cat in list(categories) + ["OVERALL"]:
+                sub = df if cat == "OVERALL" else df[df["category"] == cat]
+                rec = {"category": cat}
+                per_alpha: dict[float, dict[str, float]] = {}
+
+                for av in alphas:
+                    lbl  = f"α={av:.2f}"
+                    sub_a = sub[pd.to_numeric(sub["section_alpha"], errors="coerce") == av]
+                    mode_sec = sub_a["top_section"].dropna().mode()
+                    rec[f"top_sec {lbl}"] = mode_sec.iloc[0] if not mode_sec.empty else None
+                    m_vals: dict[str, float] = {}
+                    for col, mlbl in present:
+                        avg = pd.to_numeric(sub_a[col], errors="coerce").mean()
+                        val = float(avg) if pd.notna(avg) else float("nan")
+                        rec[f"{mlbl} {lbl}"] = round(val, 3) if math.isfinite(val) else None
+                        m_vals[mlbl] = val
+                    per_alpha[av] = m_vals
+
+                sec_modes = [rec.get(f"top_sec α={av:.2f}") for av in alphas]
+                rec["section_shifted"] = "YES" if len({s for s in sec_modes if s}) > 1 else "no"
+
+                # Δ between last and first alpha value for each metric
+                for _, mlbl in present:
+                    b = per_alpha[alphas[0]].get(mlbl, float("nan"))
+                    c = per_alpha[alphas[-1]].get(mlbl, float("nan"))
+                    rec[f"Δ_{mlbl}"] = (
+                        round(c - b, 3) if math.isfinite(b) and math.isfinite(c) else None
+                    )
+
+                p2_rows.append(rec)
+            part2_df = pd.DataFrame(p2_rows)
+
+    # ── Assemble and write ────────────────────────────────────────────────────
+    t1 = pd.DataFrame([{"category": "── RETRIEVED SECTION × CATEGORY PERFORMANCE ──"}])
+    frames: list[pd.DataFrame] = [t1, part1_df]
+
+    if part2_df is not None:
+        t2     = pd.DataFrame([{"category": "── SECTION ROUTING (α) IMPACT BY CATEGORY ──"}])
+        spacer = pd.DataFrame([{"category": ""}, {"category": ""}])
+        frames += [spacer, t2, part2_df]
+
+    pd.concat(frames, ignore_index=True).to_excel(
+        writer, sheet_name="section_routing", index=False
+    )
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
