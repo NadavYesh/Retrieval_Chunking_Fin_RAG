@@ -7,7 +7,11 @@ df = pd.read_excel(
     sheet_name="baseline_comparison",
 )
 
-metric_cols = ["Δ_word_recall", "Δ_num_recall", "Δ_soft_MRR", "Δ_soft_Recall@3", "Δ_soft_NDCG@5"]
+metric_cols = ["Δ_word_recall", "Δ_num_recall", 
+                "Δ_soft_MRR", 
+                "Δ_soft_Recall@3",
+                 "Δ_soft_NDCG@5"
+                ]
 values = df[metric_cols].to_numpy()
 
 #%%
@@ -31,7 +35,7 @@ mask = pareto_efficient_mask(values)
 #%%
 
 pareto_df = df.loc[mask, ["config_key", *metric_cols]].copy()
-print(f"{mask.sum()} / {len(df)} configs are Pareto-efficient")
+#print(f"{mask.sum()} / {len(df)} configs are Pareto-efficient")
 
 #%% min max
 
@@ -42,5 +46,20 @@ pareto_df[norm_cols] = (pareto_df[metric_cols] - col_min) / (col_max - col_min)
 pareto_df["norm_sum"] = pareto_df[norm_cols].sum(axis=1)
 
 pareto_df = pareto_df.sort_values(by="norm_sum", ascending=False)
-pareto_df
+# %% Print full df with Pareto rows
+df = df.iloc[pareto_df.index]
+# %% Heatmap: config_key (rows) x metric_cols (columns)
+
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+heatmap_data = df.set_index("config_key")[metric_cols]
+
+plt.figure(figsize=(1.5 * len(metric_cols) + 2, 0.4 * len(heatmap_data) + 2))
+sns.heatmap(heatmap_data, annot=True, fmt=".3f", cmap="RdYlGn", center=0)
+plt.xlabel("Metric")
+plt.ylabel("Config")
+plt.title("Δ Metrics by Config")
+plt.tight_layout()
+plt.show()
 # %%
