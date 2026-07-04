@@ -153,6 +153,44 @@ def enrich_md_text(md_text):
 
 
 
+TOC_SEGMENT_RE = re.compile(r"^\*{0,2}\s*table of contents\s*\*{0,2}$", re.I)
+
+
+def strip_toc_running_headers(markdown: str) -> str:
+    """
+    Drop the "Table of Contents" running-page-header artifact from header
+    lines. SEC filings repeat this text at the top of every page, and
+    sec2md/enrich_md_text end up emitting it as its own header segment
+    (standalone, or piped alongside the page's real title, e.g.
+    "### Table of Contents | Our Strategy"). Left in place, it pollutes the
+    'item'/'subitem' metadata used downstream for embedding with a string
+    that recurs on nearly every page, exactly the kind of non-discriminative
+    boilerplate that metadata is meant to avoid.
+
+    Segments are filtered individually (splitting on the same " | " that
+    inject_header_placeholders joins consecutive headers with), so this
+    catches both the standalone and the piped-with-a-real-title cases.
+    A header left with no remaining title after filtering is dropped
+    entirely, so its content simply continues under the previous section
+    instead of anchoring a spuriously titled chunk.
+    """
+    header_re = re.compile(r"^(#{1,4})\s+(.*)$")
+    out_lines = []
+    for line in markdown.split("\n"):
+        match = header_re.match(line)
+        if not match:
+            out_lines.append(line)
+            continue
+
+        level, title = match.group(1), match.group(2)
+        kept = [seg.strip() for seg in title.split("|") if not TOC_SEGMENT_RE.match(seg.strip())]
+        if kept:
+            out_lines.append(f"{level} {' | '.join(kept)}")
+        # else: drop the line entirely — pure running-header noise.
+
+    return "\n".join(out_lines)
+
+
 def inject_header_placeholders(markdown: str) -> str:
     """
     ########## Solution to ignored headers problem ################

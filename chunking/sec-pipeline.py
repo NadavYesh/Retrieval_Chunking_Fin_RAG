@@ -10,7 +10,7 @@ sys.path.append(str(Path(__file__).resolve().parent.parent))
 from prompts import ENRICH_CHUNKS_PROMPT 
 from metadata_extractor import get_meta_sec, sec_metadata
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from sec_processing import sec_to_mk, sec_splitter_headers, enrich_md_text, inject_header_placeholders, chunk_document
+from sec_processing import sec_to_mk, sec_splitter_headers, enrich_md_text, strip_toc_running_headers, inject_header_placeholders, chunk_document
 
 
 
@@ -31,6 +31,7 @@ def _html_to_md(html_path: str, MD_PATH: str) -> str:
     print("Converting to Markdown...")
     mk_file = sec_to_mk(html_content)
     mk_file = enrich_md_text(mk_file)
+    mk_file = strip_toc_running_headers(mk_file)
     mk_file = inject_header_placeholders(mk_file)
     Path(MD_PATH).parent.mkdir(parents=True, exist_ok=True)
     with open(MD_PATH, 'w', encoding='utf-8') as f:
