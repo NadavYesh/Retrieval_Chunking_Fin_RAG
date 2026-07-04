@@ -22,8 +22,12 @@ from sec_processing import sec_to_mk, sec_splitter_headers, enrich_md_text, inje
 def _html_to_md(html_path: str, MD_PATH: str) -> str:
     """HTML → enriched, placeholder-injected markdown. Saves .md file."""
     print(f"Loading SEC filing from: {html_path}")
-    with open(html_path, 'r', encoding='utf-8') as f:
-        html_content = f.read()
+    try:
+        with open(html_path, 'r', encoding='utf-8') as f:
+            html_content = f.read()
+    except UnicodeDecodeError:
+        with open(html_path, 'r', encoding='cp1252') as f:
+            html_content = f.read()
     print("Converting to Markdown...")
     mk_file = sec_to_mk(html_content)
     mk_file = enrich_md_text(mk_file)
@@ -90,6 +94,7 @@ def build_child_level(
 
     header_chunks_raw must have _id set in metadata (output of build_header_level).
     """
+    # chunk_document uses table aware splitting.
     child_chunks = chunk_document(
         budget=budget,
         header_chunks=header_chunks_raw,
@@ -259,6 +264,7 @@ if __name__ == "__main__":
     )
 
     BASE_CHUNKS = "/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/chunks/hierarchical/indexed-at-30-06-26-limited-with-enriched"
+    ##########################################################
     BASE_MD     = "/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/md/indexed-at-26-06-26/new_batch"
 
     # Load phi-4 once for the whole batch (expensive — skip if not running level 3)
