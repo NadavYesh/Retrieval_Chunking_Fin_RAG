@@ -27,6 +27,19 @@ files = [f for f in os.listdir(path_) if f.endswith(".pkl")]
 CHUNK_PATHS = [os.path.join(path_, f) for f in files]
 
 
+def fmt_title(b):
+    # Same rationale as ingest_dense.py's fmt_title: 'section'/'subsection' are
+    # boilerplate SEC item titles repeated verbatim across every 10-K, while
+    # 'item'/'subitem' are the header text that actually describes the chunk's
+    # content — the only metadata worth folding into the indexed text.
+    fields = [
+        ("ticker", b.get("ticker")),
+        ("item", b.get("item")),
+        ("subitem", b.get("subitem")),
+    ]
+    return "title: " + ", ".join(f"{k}: {v}" for k, v in fields if v)
+
+
 def init_collection():
     try:
         client.create_collection(
@@ -89,10 +102,15 @@ def upsert_bm25_data():
                 text_lower = text.lower() if isinstance(text, str) else text
                 payload["text"] = text_lower
 
+                # Same split as ingest_dense.py: the payload keeps the raw chunk
+                # text, while the indexed/matched text also folds in the
+                # descriptive (non-boilerplate) metadata via fmt_title.
+                indexed_text = f"{fmt_title(metadata)} | text: {text_lower}"
+
                 points.append(
                     PointStruct(
                         id=p_id,
-                        vector={"bm25": models.Document(text=text_lower, model="qdrant/bm25")},
+                        vector={"bm25": models.Document(text=indexed_text, model="qdrant/bm25")},
                         payload=payload,
                     )
                 )

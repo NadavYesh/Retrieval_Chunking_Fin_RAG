@@ -25,9 +25,8 @@ client = get_qdrant_client()
 #coll_name_dense = "--limited --level 1 DENSE"
 
 ############### make false for not level 3
-#level_3_enriched = False 
+#level_3_enriched = False
 
-EMBED_META = True # this is misleading, as the current file embed textual meta.
 import os
 # path_ = "/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/chunks/hierarchical/indexed-at-30-06-26-limited-with-enriched/header"
 # files = os.listdir(path_)
@@ -147,32 +146,19 @@ def upsert_data(chunk_paths, coll_name_dense, level_3_enriched=False):
                      date_ = date_[:len(date_)-2] + "20" + date_[len(date_)-2:]
                 metadatas[i]["fiscal_year_end"] = datetime.strptime(date_, "%m-%d-%Y").date()
         
-        # change the metadata embedding routine
-        # empirically, it appears that most HELPFUL metadata lies in the direct header above text/table.
-        # for tables, it is absolutuley impossible to understand the table without the header right before it.
-        if EMBED_META: 
-            combined = [str(metas)[1:len(str(metas))-1] + ", 'text': " + txt for (metas,txt) in zip(metadatas,texts)]
-        else:
-            combined = texts
-            # Gemma models often perform better with a document prefix
-            combined = [txt for txt in texts]
-
+        # Metadata is embedded via fmt_title() below — only the descriptive,
+        # non-boilerplate fields (ticker/item/subitem), not the raw metadata dict.
         batches = zip(
-            get_batches(combined, upsert_batch), 
-            get_batches(metadatas, upsert_batch), 
+            get_batches(texts, upsert_batch),
+            get_batches(metadatas, upsert_batch),
             get_batches(ids, upsert_batch),
             get_batches(raw_texts, upsert_batch)
         )
         for batch_idx, (batch_texts, batch_metadatas, batch_ids, batch_raw) in enumerate(batches):
 
             print(f"  Encoding batch {batch_idx + 1}...")
-            # doc_title = f"10-K filing for ticker: {batch_metadatas.get("ticker")}, fiscal year end: {batch_metadatas.get("fiscal_year_end")}"
             # formatted_docs contains the gemma-specific prompt style of "title: | text:"
-
-            #f"title: {doc_title} | text: {batch_texts}"
-            
             batch_texts_prompt          = [f" | text: {b}" for b in batch_texts]
-            # only include nonempty metas
             batch_metadatas_prompt      = [fmt_title(b) for b in batch_metadatas]
             formatted_doc = [b_meta + b_txt for (b_meta,b_txt) in zip(batch_metadatas_prompt, batch_texts_prompt)]
             embeddings = get_embedding(formatted_doc, embed_model, embed_tokenizer)
