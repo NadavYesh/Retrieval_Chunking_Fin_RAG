@@ -254,7 +254,7 @@ if __name__ == "__main__":
     RAW_DIR  = '/Users/nadavsmacbookair/Desktop/Thesis/data/html/indexed at 03-07-26'
     RAW_FILES = [f for f in os.listdir(RAW_DIR) if f.endswith(".html")]
 
-    BUDGET = 400
+    BUDGET = 500
     enc = tiktoken.encoding_for_model("text-embedding-3-small")
     LENGTH_FUNC = lambda text: len(enc.encode(text))
     CHAR_SPLITTER = RecursiveCharacterTextSplitter(

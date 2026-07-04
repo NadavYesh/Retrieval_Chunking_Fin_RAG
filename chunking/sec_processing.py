@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 sys.path.append("/Users/nadavsmacbookair/Documents/sec2md/src")
 import sec2md 
-from typing import Optional
+from typing import NamedTuple, Optional
 from langchain_core.documents import Document
 from langchain_text_splitters import MarkdownHeaderTextSplitter
 
@@ -362,6 +362,10 @@ def split_large_table(
     length_function,
 ) -> list[Document]:
     """
+    Currently unused: tables are now always kept atomic (see `_pack_segments`),
+    never row-split, even when they exceed `budget`. Kept unreferenced for a
+    possible future ablation comparing row-split vs. atomic table chunking.
+
     Split a markdown table that exceeds `budget` by grouping rows into
     sub-chunks, each prefixed with the caption and column headers.
 
@@ -415,78 +419,131 @@ def split_large_table(
     return chunks
 
 
-def split_chunk_with_table_awareness(
+class _Segment(NamedTuple):
+    """
+    An ordered unit of a header chunk's content, produced by `_segment_header_chunk`.
+
+    kind:           "prose" or "table".
+    text:           The raw text of this unit. A "table" unit is never split
+                     internally, no matter its size.
+    caption_source: Only meaningful for kind == "table" — the raw, unsplit prose
+                     that immediately preceded this table in the original text
+                     (same input `_get_caption` uses). "" if none preceded it.
+    """
+    kind: str
+    text: str
+    caption_source: str = ""
+
+
+def _split_into_paragraphs(text: str) -> list[str]:
+    """Split prose text into paragraph-level units on blank lines."""
+    return [p for p in re.split(r'\n{2,}', text.strip('\n')) if p.strip()]
+
+
+def _segment_header_chunk(text: str) -> list[_Segment]:
+    """
+    Break a header chunk's text into an ordered sequence of paragraph-level
+    prose segments and atomic table segments (via TABLE_PATTERN), preserving
+    document order so they can be greedily packed back together.
+    """
+    segments: list[_Segment] = []
+    last_end = 0
+
+    for match in TABLE_PATTERN.finditer(text):
+        start, end = match.start(), match.end()
+        prose_before = text[last_end:start]
+        for para in _split_into_paragraphs(prose_before):
+            segments.append(_Segment("prose", para))
+        segments.append(_Segment("table", match.group("table"), caption_source=prose_before))
+        last_end = end
+
+    for para in _split_into_paragraphs(text[last_end:]):
+        segments.append(_Segment("prose", para))
+
+    return segments
+
+
+def _pack_segments(
+    segments: list[_Segment],
+    metadata: dict,
+    budget: int,
+    length_function,
+    char_splitter,
+) -> list[Document]:
+    """
+    Greedily pack an ordered sequence of prose/table segments into chunks up
+    to `budget`, merging prose and tables from the same header chunk whenever
+    they fit together (instead of always isolating every table), and never
+    splitting a table internally — even one that exceeds `budget` alone.
+    """
+    result: list[Document] = []
+    buffer: list[str] = []
+
+    def flush():
+        if buffer:
+            result.append(Document(page_content="\n\n".join(buffer), metadata=dict(metadata)))
+            buffer.clear()
+
+    for seg in segments:
+        bare_tokens = _count_tokens(seg.text, length_function)
+
+        if bare_tokens > budget:
+            # Doesn't fit even alone -> can't fit merged either.
+            flush()
+            if seg.kind == "table":
+                caption = _get_caption(seg.caption_source) if seg.caption_source else ""
+                final_text = f"{caption}\n{seg.text}" if caption else seg.text
+                result.append(Document(page_content=final_text, metadata=dict(metadata)))
+            else:
+                result.extend(char_splitter.create_documents([seg.text], metadatas=[metadata]))
+            continue
+
+        if buffer:
+            candidate = "\n\n".join(buffer + [seg.text])
+            if _count_tokens(candidate, length_function) <= budget:
+                buffer.append(seg.text)
+                continue
+            flush()
+
+        # Buffer is empty here (either started empty, or a merge attempt just
+        # failed and got flushed) -> seed a fresh buffer with this segment.
+        seed = seg.text
+        if seg.kind == "table" and seg.caption_source:
+            caption = _get_caption(seg.caption_source)
+            if caption:
+                captioned = f"{caption}\n{seg.text}"
+                if _count_tokens(captioned, length_function) <= budget:
+                    seed = captioned
+        buffer.append(seed)
+
+    flush()
+    return result
+
+
+def pack_prose_and_tables(
     doc: Document,
     budget: int,
     length_function,
     char_splitter,
 ) -> list[Document]:
     """
-    For a single header-split chunk (Document), detect markdown tables and:
-      - Keep tables that fit within `budget` as atomic chunks (with caption prepended).
-      - Row-split tables that exceed `budget`, repeating headers on each sub-chunk.
-      - Split non-table text segments normally via `char_splitter`.
+    For a single header-split chunk (Document), pack its paragraphs and tables
+    into child chunks up to `budget`, keeping adjacent prose context (lead-in
+    sentence, trailing explanation) together with a table whenever it fits,
+    instead of always carving every table out into its own isolated chunk.
+    A table is never split internally, even if it alone exceeds `budget`.
 
     Args:
         doc:              A Document from MarkdownHeaderTextSplitter.
         budget:           Max tokens (or chars) per chunk — same unit as length_function.
         length_function:  Callable(str) -> int, e.g. token counter or len.
-        char_splitter:    Your RecursiveCharacterTextSplitter instance (for prose segments).
+        char_splitter:    Your RecursiveCharacterTextSplitter instance (for oversized prose).
 
     Returns:
         List of Documents, all inheriting `doc.metadata`.
     """
-    text = doc.page_content #chunk.page_content is the text. 
-    metadata = doc.metadata
-    result: list[Document] = [] # doc list
-
-    last_end = 0
-    # finiter is a re object
-    for match in TABLE_PATTERN.finditer(text): # when table detected
-        start, end = match.start(), match.end() # match is re-type object
-        # --- Prose segment before the table ---
-        prose_before = text[last_end:start] #this is from chunk start to start of table, and then from end of last detected table to start of new
-        if prose_before.strip(): #
-            sub_docs = char_splitter.create_documents(
-                [prose_before], metadatas=[metadata]
-            )
-            result.extend(sub_docs) # append would give nested list if a document is split into more than 1 chunk
-
-        # --- Caption: last non-empty line before this table ---
-        caption = _get_caption(text[last_end:start])
-
-        # --- Table itself ---
-        table_text = match.group("table")
-        full_table_with_caption = (caption + "\n" if caption else "") + table_text
-        table_tokens = _count_tokens(full_table_with_caption, length_function) # evaluate length
-
-        if table_tokens <= budget:
-            # Fits whole: emit as single atomic chunk
-            result.append(
-                Document(page_content=full_table_with_caption, metadata=dict(metadata))
-            )
-        else:
-            # Too large: row-split with header repetition
-            sub_docs = split_large_table(
-                table_text=table_text,
-                caption=caption,
-                metadata=metadata,
-                budget=budget,
-                length_function=length_function,
-            )
-            result.extend(sub_docs)
-
-        last_end = end
-
-    # --- Remaining prose after the last table ---
-    prose_after = text[last_end:]
-    if prose_after.strip():
-        sub_docs = char_splitter.create_documents(
-            [prose_after], metadatas=[metadata]
-        )
-        result.extend(sub_docs)
-
-    return result
+    segments = _segment_header_chunk(doc.page_content)
+    return _pack_segments(segments, doc.metadata, budget, length_function, char_splitter)
 
 
 def chunk_document(
@@ -506,11 +563,10 @@ def chunk_document(
     for chunk in header_chunks:
         parent_id = chunk.metadata.get("_id")
         chunk_tokens = _count_tokens(chunk.page_content, length_function)
-        IS_TABLE = TABLE_PATTERN.search(chunk.page_content)
-        if chunk_tokens <= budget and not IS_TABLE:
+        if chunk_tokens <= budget:
             sub_chunks = [chunk]
         else:
-            sub_chunks = split_chunk_with_table_awareness(
+            sub_chunks = pack_prose_and_tables(
                 doc=chunk,
                 budget=budget,
                 length_function=length_function,
