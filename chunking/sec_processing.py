@@ -568,12 +568,14 @@ def _pack_segments(
 
     A "run_header" segment (e.g. "*Americas*") never merges with what came
     before it — it always starts a fresh chunk — and its label is attached as
-    metadata["run_header"] to every chunk produced from that point onward,
-    until the next run-header segment replaces it. This keeps a token-budget
-    boundary from silently blending two unrelated subsections together (e.g.
-    the tail of an "Americas" breakdown with the start of "Europe"'s) purely
-    because they happened to fit together, and gives each resulting chunk the
-    specific, contextual label instead of just the section's overall header.
+    metadata["run_header"] (not duplicated into the chunk text, since it's
+    already embedded via fmt_title) to every chunk produced from that point
+    onward, until the next run-header segment replaces it. This keeps a
+    token-budget boundary from silently blending two unrelated subsections
+    together (e.g. the tail of an "Americas" breakdown with the start of
+    "Europe"'s) purely because they happened to fit together, and gives each
+    resulting chunk the specific, contextual label instead of just the
+    section's overall header.
     """
     result: list[Document] = []
     buffer: list[str] = []
@@ -586,9 +588,12 @@ def _pack_segments(
 
     for seg in segments:
         if seg.kind == "run_header":
+            # Flush what came before, then only update the label going
+            # forward — don't seed the buffer with it. It's already carried
+            # as metadata["run_header"] (embedded via fmt_title), so leaving
+            # it out of the text avoids duplicating it there too.
             flush()
             current_metadata = {**metadata, "run_header": seg.text}
-            buffer.append(seg.text)
             continue
 
         bare_tokens = _count_tokens(seg.text, length_function)
