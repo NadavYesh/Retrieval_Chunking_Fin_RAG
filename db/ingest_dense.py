@@ -52,7 +52,7 @@ def init_collection(coll_name_dense):
 
     client.create_payload_index(coll_name_dense, "fiscal_year_end", qdrant_models.PayloadSchemaType.DATETIME)
 
-    for field in ["section", "subsection", "item"]:
+    for field in ["section", "subsection", "item", "subitem", "run_header"]:
         client.create_payload_index(coll_name_dense, field, qdrant_models.PayloadSchemaType.TEXT)
 
     for field in ["doc_id", "parent_id"]:
@@ -84,15 +84,19 @@ def init_collection(coll_name_dense):
 def fmt_title(b):
     # 'section'/'subsection' are boilerplate SEC item titles (identical across
     # every 10-K ever filed) and add no discriminative signal to the embedding.
-    # 'subitem' (deepest header, e.g. a table/line-item caption) and 'item'
-    # (the header directly above the content) are the parts of the header
-    # hierarchy that actually describe what's in the chunk, so those are what
-    # gets embedded — subitem is more specific when present, so both are kept
-    # together rather than one replacing the other.
+    # 'subitem' (deepest Markdown header, e.g. a table/line-item caption),
+    # 'item' (the header directly above the content), and 'run_header' (a
+    # child-level "*Label*" run-in subheading, e.g. "Americas", one level
+    # deeper than the Markdown header hierarchy — see pack_prose_and_tables)
+    # are the parts of the header hierarchy that actually describe what's in
+    # the chunk, so those are what gets embedded — each is more specific than
+    # the last when present, so all are kept together rather than one
+    # replacing another.
     fields = [
         ("ticker", b.get("ticker")),
         ("item", b.get("item")),
         ("subitem", b.get("subitem")),
+        ("run_header", b.get("run_header")),
     ]
     return "title: " + ", ".join(f"{k}: {v}" for k, v in fields if v)
 

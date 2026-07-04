@@ -19,6 +19,8 @@ class doc_payload(pydantic.BaseModel):
     section: Optional[str] = None
     subsection: Optional[str] = None
     item: Optional[str] = None
+    subitem: Optional[str] = None      # Markdown #### header, when the filing's headers go a level deeper
+    run_header: Optional[str] = None   # child-level "*Label*" run-in subheading (e.g. "Americas"), one level deeper still
     # parent-document retrieval linkage
     doc_id: Optional[str] = None       # UUID of the full-document chunk
     parent_id: Optional[str] = None    # UUID of the header-level chunk (child chunks only)
@@ -28,7 +30,7 @@ class doc_payload(pydantic.BaseModel):
     # Normalize all string fields to lowercase
     @pydantic.field_validator(
         'form_type', 'company_name', 'ticker',
-        'section', 'subsection', 'item', 'description',
+        'section', 'subsection', 'item', 'subitem', 'run_header', 'description',
         mode="before"
     )
     @classmethod

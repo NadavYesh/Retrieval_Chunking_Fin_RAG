@@ -507,9 +507,19 @@ def _is_run_header_candidate(title: str) -> bool:
     sentences rather than titles. Filter those out: real run-in subheadings
     in this corpus are short labels with no leading digit and no
     sentence-ending period; footnotes reliably have one or both.
+
+    Also reject the recurring "Table of Contents" running-page-header
+    artifact (TOC_SEGMENT_RE — see strip_toc_running_headers above). That
+    should already be stripped out of `#`-level headers before this stage
+    ever runs, but this guards against it also surfacing as a standalone
+    `*Table of Contents*` paragraph in chunk body text (e.g. from a stale
+    corpus snapshot predating that fix) and getting embedded as if it were
+    a genuine, discriminative subheading.
     """
     title = title.strip()
-    return bool(title) and not title[0].isdigit() and not title.endswith('.')
+    if not title or title[0].isdigit() or title.endswith('.'):
+        return False
+    return not TOC_SEGMENT_RE.match(title)
 
 
 def _paragraph_to_segment(para: str) -> _Segment:
