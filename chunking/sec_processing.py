@@ -289,7 +289,57 @@ def sec_splitter_headers(doc):
         if chunk.page_content and not chunk.page_content.endswith('\n'):
             chunk.page_content += '\n'
 
-    return(header_chunks)
+    return _merge_header_only_chunks(header_chunks)
+
+
+HEADER_ONLY_MARKER = "<!-- header-only -->"
+
+
+def _merge_header_metadata(orphan_meta: dict, next_meta: dict) -> dict:
+    """
+    Fold an orphaned (header-only) chunk's metadata onto the metadata of the
+    chunk that follows it: shared keys with differing values are pipe-joined
+    (orphan's title first, since it comes first in the document), keys unique
+    to the orphan are carried over as-is, and identical values are left alone.
+    """
+    merged = dict(next_meta)
+    for key, value in orphan_meta.items():
+        if key not in next_meta:
+            merged[key] = value
+        elif next_meta[key] != value:
+            merged[key] = f"{value} | {next_meta[key]}"
+    return merged
+
+
+def _merge_header_only_chunks(header_chunks: list) -> list:
+    """
+    inject_header_placeholders leaves a `<!-- header-only -->` marker chunk
+    wherever a header has no content before the next header — needed so the
+    header's title survives the split at all, but it ships downstream as a
+    chunk with no real text. Instead of emitting it as its own empty chunk,
+    fold its metadata forward onto the next (real) chunk and drop it. A run
+    of several header-only chunks in a row accumulates in document order
+    before being folded onto the first chunk with real content; a run that
+    reaches the end of the document with no real chunk to attach to is
+    dropped, since there is nothing left to attach its title to.
+    """
+    merged: list = []
+    pending_meta: Optional[dict] = None
+
+    for chunk in header_chunks:
+        if chunk.page_content.strip() == HEADER_ONLY_MARKER:
+            pending_meta = (
+                chunk.metadata if pending_meta is None
+                else _merge_header_metadata(pending_meta, chunk.metadata)
+            )
+            continue
+
+        if pending_meta is not None:
+            chunk.metadata = _merge_header_metadata(pending_meta, chunk.metadata)
+            pending_meta = None
+        merged.append(chunk)
+
+    return merged
 
 # Matches a full markdown table: one or more pipe rows, then a separator row, then data rows
 pipe_row = r'(?:\|.+\|\n)'

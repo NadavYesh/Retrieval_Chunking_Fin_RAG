@@ -153,11 +153,24 @@ def build_enriched_level(
 
     n = len(child_df)
     descriptions = []
+    MIN_TOKENS_FOR_ENRICHMENT = 20
 
     for i, (_, row) in enumerate(child_df.iterrows()):
+        text = row["text"]
+        # Chunks this short (e.g. "<!-- header-only -->" placeholders) give the
+        # model nothing to summarize. Asked to produce a summary regardless, it
+        # fabricates one by pattern-matching the prompt's own example instead of
+        # the (empty) input. Skip the LLM call; leave description empty rather
+        # than duplicating text (ingest embeds `description + text` verbatim).
+        if len(tokenizer.encode(text)) < MIN_TOKENS_FOR_ENRICHMENT:
+            descriptions.append("")
+            if (i + 1) % 20 == 0 or (i + 1) == n:
+                print(f"  Enriched {i + 1}/{n} chunks")
+            continue
+
         messages = [
             {"role": "system", "content": ENRICH_CHUNKS_PROMPT},
-            {"role": "user",   "content": row["text"]},
+            {"role": "user",   "content": text},
         ]
         prompt = tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
@@ -167,7 +180,7 @@ def build_enriched_level(
         match = re.search(r'<summary>(.*?)</summary>',desc.strip())
         if match:
             result = match.group(1)
-            desc = result.strip()  # Output: target text        
+            desc = result.strip()  # Output: target text
         descriptions.append(desc)
         if (i + 1) % 20 == 0 or (i + 1) == n:
             print(f"  Enriched {i + 1}/{n} chunks")
