@@ -22,47 +22,46 @@ client = get_qdrant_client()
 
 ######################
 # Configuration
-COLL_NAME_DENSE = "--limited --level 1 DENSE"
+#coll_name_dense = "--limited --level 1 DENSE"
 
 ############### make false for not level 3
-LEVEL_3_ENRICHED = False 
+#level_3_enriched = False 
 
-EMBED_META = False # this is misleading, as the current file embed textual meta.
+EMBED_META = True # this is misleading, as the current file embed textual meta.
 import os
-path_ = "/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/chunks/hierarchical/indexed-at-30-06-26-limited-with-enriched/header"
-files = os.listdir(path_)
-files = [f for f in files if f.endswith(".pkl")]
-paths=[os.path.join(path_,f)for f in files]
+# path_ = "/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/chunks/hierarchical/indexed-at-30-06-26-limited-with-enriched/header"
+# files = os.listdir(path_)
+# files = [f for f in files if f.endswith(".pkl")]
+# paths=[os.path.join(path_,f)for f in files]
 
 #%%
-CHUNK_PATHS = paths
-def init_collection():
+def init_collection(coll_name_dense):
     try:
         client.create_collection(
-            collection_name=COLL_NAME_DENSE,
+            collection_name=coll_name_dense,
             vectors_config=VectorParams(size=768, distance=Distance.COSINE),
             on_disk_payload=True
         )
-        print(f"Collection {COLL_NAME_DENSE} created.")
+        print(f"Collection {coll_name_dense} created.")
     except Exception:
-        print(f"Collection {COLL_NAME_DENSE} already exists.")
+        print(f"Collection {coll_name_dense} already exists.")
 
     # Create indices by type. not everything must have a value
     fields = ["form_type", "company_name", "ticker"]
     for field in fields:
-        client.create_payload_index(COLL_NAME_DENSE, field, qdrant_models.PayloadSchemaType.KEYWORD)
+        client.create_payload_index(coll_name_dense, field, qdrant_models.PayloadSchemaType.KEYWORD)
 
-    client.create_payload_index(COLL_NAME_DENSE, "fiscal_year_end", qdrant_models.PayloadSchemaType.DATETIME)
+    client.create_payload_index(coll_name_dense, "fiscal_year_end", qdrant_models.PayloadSchemaType.DATETIME)
 
     for field in ["section", "subsection", "item"]:
-        client.create_payload_index(COLL_NAME_DENSE, field, qdrant_models.PayloadSchemaType.TEXT)
+        client.create_payload_index(coll_name_dense, field, qdrant_models.PayloadSchemaType.TEXT)
 
     for field in ["doc_id", "parent_id"]:
-        client.create_payload_index(COLL_NAME_DENSE, field, qdrant_models.PayloadSchemaType.KEYWORD)
+        client.create_payload_index(coll_name_dense, field, qdrant_models.PayloadSchemaType.KEYWORD)
 
 
     client.create_payload_index(
-        collection_name=COLL_NAME_DENSE,
+        collection_name=coll_name_dense,
         field_name="text",
         field_schema=qdrant_models.TextIndexParams(
             type=qdrant_models.TextIndexType.TEXT,
@@ -73,7 +72,7 @@ def init_collection():
     )
     # only for enriched
     client.create_payload_index(
-        collection_name=COLL_NAME_DENSE,
+        collection_name=coll_name_dense,
         field_name="description",
         field_schema=qdrant_models.TextIndexParams(
             type=qdrant_models.TextIndexType.TEXT,
@@ -84,11 +83,17 @@ def init_collection():
     )
 
 def fmt_title(b):
+    # 'section'/'subsection' are boilerplate SEC item titles (identical across
+    # every 10-K ever filed) and add no discriminative signal to the embedding.
+    # 'subitem' (deepest header, e.g. a table/line-item caption) and 'item'
+    # (the header directly above the content) are the parts of the header
+    # hierarchy that actually describe what's in the chunk, so those are what
+    # gets embedded — subitem is more specific when present, so both are kept
+    # together rather than one replacing the other.
     fields = [
         ("ticker", b.get("ticker")),
-        ("fiscal year end", b.get("fiscal_year_end")),
-        ("subsection", b.get("subsection")),
         ("item", b.get("item")),
+        ("subitem", b.get("subitem")),
     ]
     return "title: " + ", ".join(f"{k}: {v}" for k, v in fields if v)
 
@@ -103,8 +108,8 @@ def get_embedding(texts, model, tokenizer):
     )
     return outputs.text_embeds.tolist() # mean pooled and normalized embeddings
 
-def upsert_data():
-    print(f"WARNING: are you absolutuley sure you want to ingest data? Make sure you are not replicating.\nthis is collection {COLL_NAME_DENSE}")
+def upsert_data(chunk_paths, coll_name_dense, level_3_enriched=False):
+    print(f"WARNING: are you absolutuley sure you want to ingest data? Make sure you are not replicating.\nthis is collection {coll_name_dense}")
     confirm = input("Type 'y' to proceed with ingestion: ")
     if confirm.lower() != 'y':
         print("Ingestion aborted.")
@@ -118,13 +123,13 @@ def upsert_data():
 
     print("Starting upserting loop...")
 
-    for path in CHUNK_PATHS:
+    for path in chunk_paths:
         print(f"Processing file: {path}")
         with open(path, "rb") as f:
             chunk = pickle.load(f)
     
         # this is for captions. 
-        if LEVEL_3_ENRICHED:
+        if level_3_enriched:
             texts = (chunk['description'] + chunk['text']).tolist()
         else:
             texts = chunk['text'].tolist()
@@ -142,7 +147,10 @@ def upsert_data():
                      date_ = date_[:len(date_)-2] + "20" + date_[len(date_)-2:]
                 metadatas[i]["fiscal_year_end"] = datetime.strptime(date_, "%m-%d-%Y").date()
         
-        if EMBED_META:
+        # change the metadata embedding routine
+        # empirically, it appears that most HELPFUL metadata lies in the direct header above text/table.
+        # for tables, it is absolutuley impossible to understand the table without the header right before it.
+        if EMBED_META: 
             combined = [str(metas)[1:len(str(metas))-1] + ", 'text': " + txt for (metas,txt) in zip(metadatas,texts)]
         else:
             combined = texts
@@ -168,12 +176,7 @@ def upsert_data():
             batch_metadatas_prompt      = [fmt_title(b) for b in batch_metadatas]
             formatted_doc = [b_meta + b_txt for (b_meta,b_txt) in zip(batch_metadatas_prompt, batch_texts_prompt)]
             embeddings = get_embedding(formatted_doc, embed_model, embed_tokenizer)
-            # embeddings = model.encode(
-            #     batch_texts,
-            #     prompt_name="document",
-            #     show_progress_bar=False,
-            #     batch_size=encode_batch,
-            # ).tolist()
+
             
             points = []
             for idx, (metadata, text, p_id, raw_txt) in enumerate(zip(batch_metadatas, batch_texts, batch_ids, batch_raw)):
@@ -194,11 +197,11 @@ def upsert_data():
                     )
                 )
             try:
-                client.upsert(collection_name=COLL_NAME_DENSE, wait=True, points=points)
+                client.upsert(collection_name=coll_name_dense, wait=True, points=points)
             except ValueError as e:
                 print(pt.id for pt in points)
         
-def remove_points_from_pkl(pkl_path, collection_name=COLL_NAME_DENSE):
+def remove_points_from_pkl(pkl_path, collection_name):
     """
     Removes points from the Qdrant collection using IDs extracted from a pickle file.
     """
@@ -216,5 +219,12 @@ def remove_points_from_pkl(pkl_path, collection_name=COLL_NAME_DENSE):
 
 #%%
 if __name__ == "__main__":
-    init_collection()
-    upsert_data()
+    coll_name_dense = "--limited --level 3 DENSE"
+    path_ = "/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/chunks/hierarchical/indexed-at-30-06-26-limited-with-enriched/enriched/batch_1"
+    files = os.listdir(path_)
+    files = [f for f in files if f.endswith(".pkl")]
+    paths=[os.path.join(path_,f)for f in files]
+    init_collection(coll_name_dense = coll_name_dense)
+    upsert_data(chunk_paths=paths,
+                coll_name_dense=coll_name_dense,
+                level_3_enriched=True)
