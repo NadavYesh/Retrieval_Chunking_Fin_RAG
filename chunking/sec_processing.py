@@ -473,9 +473,11 @@ class _Segment(NamedTuple):
     """
     An ordered unit of a header chunk's content, produced by `_segment_header_chunk`.
 
-    kind:           "prose" or "table".
+    kind:           "prose", "table", or "run_header".
     text:           The raw text of this unit. A "table" unit is never split
-                     internally, no matter its size.
+                     internally, no matter its size. For "run_header", this is
+                     just the label itself (asterisks stripped), not a full
+                     paragraph.
     caption_source: Only meaningful for kind == "table" — the raw, unsplit prose
                      that immediately preceded this table in the original text
                      (same input `_get_caption` uses). "" if none preceded it.
@@ -490,11 +492,39 @@ def _split_into_paragraphs(text: str) -> list[str]:
     return [p for p in re.split(r'\n{2,}', text.strip('\n')) if p.strip()]
 
 
+# A standalone `*Label*` line, e.g. "*Americas*" or "*iPhone*" — SEC filers use
+# this single-asterisk (italic) pattern as a lightweight run-in subheading
+# beneath a `###`/`####` header, one level deeper than the Markdown header
+# hierarchy MarkdownHeaderTextSplitter already captures (e.g. per-geography or
+# per-product breakdowns under a single "Segment Operating Performance" item).
+RUN_HEADER_PATTERN = re.compile(r'^\*(?!\*)([^\n*]{1,80})\*$')
+
+
+def _is_run_header_candidate(title: str) -> bool:
+    """
+    The same single-asterisk line pattern is also used for footnotes (e.g.
+    "*See accompanying notes.*", "*1 Some disclaimer.*"), which read as full
+    sentences rather than titles. Filter those out: real run-in subheadings
+    in this corpus are short labels with no leading digit and no
+    sentence-ending period; footnotes reliably have one or both.
+    """
+    title = title.strip()
+    return bool(title) and not title[0].isdigit() and not title.endswith('.')
+
+
+def _paragraph_to_segment(para: str) -> _Segment:
+    match = RUN_HEADER_PATTERN.match(para.strip())
+    if match and _is_run_header_candidate(match.group(1)):
+        return _Segment("run_header", match.group(1).strip())
+    return _Segment("prose", para)
+
+
 def _segment_header_chunk(text: str) -> list[_Segment]:
     """
     Break a header chunk's text into an ordered sequence of paragraph-level
-    prose segments and atomic table segments (via TABLE_PATTERN), preserving
-    document order so they can be greedily packed back together.
+    prose segments, atomic table segments (via TABLE_PATTERN), and run-header
+    segments (via RUN_HEADER_PATTERN), preserving document order so they can
+    be greedily packed back together.
     """
     segments: list[_Segment] = []
     last_end = 0
@@ -503,12 +533,12 @@ def _segment_header_chunk(text: str) -> list[_Segment]:
         start, end = match.start(), match.end()
         prose_before = text[last_end:start]
         for para in _split_into_paragraphs(prose_before):
-            segments.append(_Segment("prose", para))
+            segments.append(_paragraph_to_segment(para))
         segments.append(_Segment("table", match.group("table"), caption_source=prose_before))
         last_end = end
 
     for para in _split_into_paragraphs(text[last_end:]):
-        segments.append(_Segment("prose", para))
+        segments.append(_paragraph_to_segment(para))
 
     return segments
 
@@ -525,16 +555,32 @@ def _pack_segments(
     to `budget`, merging prose and tables from the same header chunk whenever
     they fit together (instead of always isolating every table), and never
     splitting a table internally — even one that exceeds `budget` alone.
+
+    A "run_header" segment (e.g. "*Americas*") never merges with what came
+    before it — it always starts a fresh chunk — and its label is attached as
+    metadata["run_header"] to every chunk produced from that point onward,
+    until the next run-header segment replaces it. This keeps a token-budget
+    boundary from silently blending two unrelated subsections together (e.g.
+    the tail of an "Americas" breakdown with the start of "Europe"'s) purely
+    because they happened to fit together, and gives each resulting chunk the
+    specific, contextual label instead of just the section's overall header.
     """
     result: list[Document] = []
     buffer: list[str] = []
+    current_metadata = dict(metadata)
 
     def flush():
         if buffer:
-            result.append(Document(page_content="\n\n".join(buffer), metadata=dict(metadata)))
+            result.append(Document(page_content="\n\n".join(buffer), metadata=dict(current_metadata)))
             buffer.clear()
 
     for seg in segments:
+        if seg.kind == "run_header":
+            flush()
+            current_metadata = {**metadata, "run_header": seg.text}
+            buffer.append(seg.text)
+            continue
+
         bare_tokens = _count_tokens(seg.text, length_function)
 
         if bare_tokens > budget:
@@ -543,9 +589,9 @@ def _pack_segments(
             if seg.kind == "table":
                 caption = _get_caption(seg.caption_source) if seg.caption_source else ""
                 final_text = f"{caption}\n{seg.text}" if caption else seg.text
-                result.append(Document(page_content=final_text, metadata=dict(metadata)))
+                result.append(Document(page_content=final_text, metadata=dict(current_metadata)))
             else:
-                result.extend(char_splitter.create_documents([seg.text], metadatas=[metadata]))
+                result.extend(char_splitter.create_documents([seg.text], metadatas=[current_metadata]))
             continue
 
         if buffer:
