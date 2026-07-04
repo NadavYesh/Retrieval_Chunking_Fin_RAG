@@ -126,7 +126,7 @@ if __name__ == "__main__":
     from mlx_lm import load
     from mlx_embeddings.utils import load as emb_load
 
-    tickers = ["tsla","pypl"]
+    tickers = ["wmt","walmart","nvda","nvidia"]
 
     print("Loading generation model...")
     gen_model, gen_tokenizer = load("mlx-community/Llama-3.2-3B-Instruct-4bit")

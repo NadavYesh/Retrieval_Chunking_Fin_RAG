@@ -264,10 +264,10 @@ def sec_chunking_pipeline_hierarchical(
 # ─────────────────────────────────────────────────────────────────────────────
 #%%
 if __name__ == "__main__":
-    RAW_DIR  = '/Users/nadavsmacbookair/Desktop/Thesis/data/html/indexed at 03-07-26'
-    RAW_FILES = [f for f in os.listdir(RAW_DIR) if f.endswith(".html")]
+    RAW_DIR  = '/Users/nadavsmacbookair/Desktop/Thesis/data/html/indexed at 03-07-26/done'
+    RAW_FILES = [f for f in os.listdir(RAW_DIR) if f.endswith(".html") and 'AAPL' in f]
 
-    BUDGET = 500
+    BUDGET = 200
     enc = tiktoken.encoding_for_model("text-embedding-3-small")
     LENGTH_FUNC = lambda text: len(enc.encode(text))
     CHAR_SPLITTER = RecursiveCharacterTextSplitter(
@@ -277,7 +277,7 @@ if __name__ == "__main__":
         length_function=LENGTH_FUNC,
     )
 
-    BASE_CHUNKS = "/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/chunks/hierarchical/indexed-at-30-06-26-limited-with-enriched"
+    BASE_CHUNKS = "/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/chunks/hierarchical/indexed-at-04-07-26-reshaped"
     ##########################################################
     BASE_MD     = "/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/md/indexed-at-26-06-26/new_batch"
 
@@ -304,7 +304,7 @@ if __name__ == "__main__":
         doc_path    = f"{BASE_CHUNKS}/doc/{name}.pkl"
         header_path = f"{BASE_CHUNKS}/header/{name}.pkl"
         child_path  = f"{BASE_CHUNKS}/child/{name}.pkl"
-        enriched_path = f"{BASE_CHUNKS}/enriched/{name}.pkl" if RUN_ENRICHED else None
+        #enriched_path = f"{BASE_CHUNKS}/enriched/{name}.pkl" if RUN_ENRICHED else None
         sec_chunking_pipeline_hierarchical(
             html_path=HTML_PATH,
             doc_path=doc_path,
@@ -314,9 +314,10 @@ if __name__ == "__main__":
             budget=BUDGET,
             length_function=LENGTH_FUNC,
             char_splitter=CHAR_SPLITTER,
-            enriched_path=enriched_path,
-            caption_=caption_,
+            #enriched_path=enriched_path,
+            # caption_=caption_,
         )
+        
 
 
 # for (path, name) in zip(path_names, RAW_FILES):
