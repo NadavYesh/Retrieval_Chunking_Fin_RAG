@@ -7,7 +7,7 @@ sys.path.append("/Users/nadavsmacbookair/Documents/sec2md/src")
 import sec2md 
 from typing import Optional
 from langchain_core.documents import Document
-from langchain_text_splitters import RecursiveCharacterTextSplitter, MarkdownHeaderTextSplitter
+from langchain_text_splitters import MarkdownHeaderTextSplitter
 
 
 #%%
@@ -230,10 +230,27 @@ def sec_splitter_headers(doc):
             ("##", "subsection"),
             ("###", "item"),
             ("####", "subitem")
-            
+
         ]
     )
     header_chunks = header_splitter.split_text(doc)
+
+    # MarkdownHeaderTextSplitter strips blank lines and rejoins the surrounding
+    # lines with a Markdown hard-break ("  \n") wherever a blank line used to be.
+    # This corrupts table rows immediately followed by prose (the blank line
+    # that used to separate them becomes part of the row's own line ending),
+    # breaking TABLE_PATTERN's `\|...\|\n` matches downstream. Restore the
+    # original blank-line paragraph/table boundaries before returning.
+    #
+    # It also never adds a trailing newline to the section's last line, so a
+    # table that ends a header-chunk has an unterminated final row — which
+    # also fails TABLE_PATTERN's `\|...\|\n` row match. Ensure every chunk
+    # ends with a newline to close out that last row.
+    for chunk in header_chunks:
+        chunk.page_content = re.sub(r' {2,}\n', '\n\n', chunk.page_content)
+        if chunk.page_content and not chunk.page_content.endswith('\n'):
+            chunk.page_content += '\n'
+
     return(header_chunks)
 
 # Matches a full markdown table: one or more pipe rows, then a separator row, then data rows
