@@ -232,7 +232,7 @@ def run_evaluation_lazy(
                     else:
                         wrapped    = SimpleNamespace(points=context_points)
                         if gen_model:
-                            rag_answer, _ = generate_llm_answer(meta["optimized_query"], wrapped, gen_model, gen_tokenizer)
+                            rag_answer, _ = generate_llm_answer(orig_query, wrapped, gen_model, gen_tokenizer)
                             print(f"    [gen] {len(rag_answer)} chars: {rag_answer[:80].strip()}...")
                         else:
                             rag_answer = " NO GENERATED ANSWER "
@@ -480,7 +480,7 @@ def run_multi_evaluation_lazy(
                                 rag_answer = "No relevant context retrieved."
                             else:
                                 wrapped    = SimpleNamespace(points=context_points)
-                                rag_answer, _ = generate_llm_answer(meta["optimized_query"], wrapped, gen_model, gen_tokenizer)
+                                rag_answer, _ = generate_llm_answer(orig_query, wrapped, gen_model, gen_tokenizer)
                                 print(f"      [gen] {len(rag_answer)} chars: {rag_answer[:80].strip()}...")
 
                         except Exception as e:
