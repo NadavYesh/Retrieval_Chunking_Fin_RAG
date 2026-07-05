@@ -34,7 +34,9 @@ TOP_K           = 5
 USE_LLM_JUDGE   = False   # set True to load Phi-4 and judge answers post-generation
 
 # Full grid: every level × every retrieval mode × every combination of
-# enhance_query_flag / use_tiered_years / section_alpha (via write_config).
+# enhance_query_flag / section_alpha (via write_config). Year filtering is
+# not a config toggle -- it's deterministic per query (see write_config's
+# docstring in evaluation/run_rag_lazy.py).
 LEVELS          = list(COLLECTIONS.keys())
 RETRIEVAL_MODES = ["hybrid", "dense", "sparse"]
 # ──────────────────────────────────────────────────────────────────────────────

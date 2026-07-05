@@ -13,52 +13,19 @@ RAG_ANSWER_PROMPT = '''
         5. If the context doesn't contain the answer, state that you don't have the right information.
         '''
 
-# Used in search_engine.py → search_agent() and langgraph_pipeline.py → query_optimizer_node()
-# Instructs the LLM to extract ticker/year metadata and rewrite the query for vector search.
+# Used in evaluation/rag_functions.py → extract_metadata()
+# Ticker, fiscal year, and form_type are no longer LLM-extracted (see
+# extract_ticker_deterministic / extract_year_deterministic in utils.py --
+# regex/lookup-based, no hallucination risk). This prompt's only remaining
+# job is the query rewrite for vector search.
 META_EXTRACT_PROMPT = """
-You are a financial analysis expert specializing in SEC 10-K filings. Your task is to transform a user's natural language request into a structured search object.
-
-### Temporal Context (READ CAREFULLY):
-This system is frozen at early 2024. The most recent available 10-K filings are for fiscal year 2024 and fiscal year 2023. 
-Apply these rules strictly:
-- "latest", "recent", "current", "this year", "current fiscal year", "current FY" → year = 2024
-- "last year", "prior year", "previous year", "previous fiscal year", "last fiscal year" → year = 2023
-- FY shorthand: FY21 = 2021, FY22 = 2022, FY23 = 2023, FY24 = 2024, FY25 = 2025 (add 2000 to 2-digit suffix)
-- Year ranges: "FY22-FY24" or "2022 to 2024" or "2022-2024" → expand to ALL years in the range: [2022, 2023, 2024]
-- Comparative / trend language → return an ARRAY covering all relevant years:
-  "year-over-year", "YoY", "prior year trends", "compared to prior year" → [2023, 2024]
-  "prior fiscal years", "historical", "multi-year" → [2022, 2023, 2024]
-- "year" MUST always be an INTEGER or ARRAY of INTEGERs, or null. NEVER return strings.
-  BAD: "year": "current fiscal year"   GOOD: "year": 2024
-  BAD: "year": "FY23"                  GOOD: "year": 2023
-  BAD: "year": "latest"                GOOD: "year": 2024
-- If no fiscal year is explicitly OR implicitly referenced, return null for year.
-  Do NOT default to 2024 for general questions with no temporal anchor.
-  BAD: "share repurchases impact on EPS" → "year": 2024
-  GOOD: "share repurchases impact on EPS" → "year": null
+You are a financial analysis expert specializing in SEC 10-K filings. Your task is to rewrite a user's natural language request into a high-density financial search query.
 
 ### Instructions:
-1. **Identify the Company**: The user might mention a company name instead of a ticker. You MUST return the stock TICKER SYMBOL in LOWERCASE — not the company name.
-   - NVIDIA / Nvidia → "nvda"
-   - Tesla → "tsla"
-   - Walmart → "wmt"
-   - PayPal → "pypl"
-   - Apple → "aapl"
-   - Microsoft → "msft"
-   - Amazon → "amzn"
-   - Alphabet / Google → "googl"
-   - Meta / Facebook → "meta"
-   - 3M → "mmm"
-   - "ticker" at the end of a query is a placeholder — identify the company from the rest of the query text and return its ticker symbol.
-   - If you cannot identify the ticker with confidence, return null.
-2. **Handle Fiscal Year**: Apply the Temporal Context rules above. Extract all relevant fiscal years. Use an array for multiple years.
-3. **optimized_prompt**: Rewrite the user's request into a high-density financial query. Use professional terminology like 'amortization', 'revenue recognition', 'liquidity risk', 'EBITDA', 'segment reporting', and 'capital expenditures' to help a vector database find the most relevant chunks of text.
-4. **payload**:
-   - "form_type": Always "10-k".
-   - "ticker": The stock ticker symbol in LOWERCASE (not the company name).
-   - "year": The fiscal year(s) as an INTEGER or an ARRAY of INTEGERs — never a string.
+Rewrite the user's request into a high-density financial query. Use professional terminology like 'amortization', 'revenue recognition', 'liquidity risk', 'EBITDA', 'segment reporting', and 'capital expenditures' to help a vector database find the most relevant chunks of text.
 
-Return ONLY a valid JSON object.
+Return ONLY a valid JSON object of the form:
+{"optimized_prompt": "..."}
 """
 
 # Used in langgraph_pipeline.py → document_grader_node()

@@ -8,7 +8,7 @@ sys.path.append(str(Path(__file__).resolve().parent.parent))
 import mlx.core as mx
 from mlx_lm import generate
 from prompts import META_EXTRACT_PROMPT, QUERY_ENHANCEMENT_PROMPT
-from utils import parse_metadata_response, sanitize_year_extraction, extract_ticker_hint
+from utils import parse_metadata_response, extract_ticker_deterministic, extract_year_deterministic
 
 MAX_ENHANCE_RETRIES = 3
 
@@ -59,23 +59,24 @@ def enhance_query(query: str, model, tokenizer) -> str:
 
 
 def extract_metadata(query: str, model, tokenizer) -> dict:
-    ticker_hint  = extract_ticker_hint(query)
-    user_content = f"{query}\n[Ticker hint: {ticker_hint.upper()}]" if ticker_hint else query
-
+    """
+    ticker/year/form_type are resolved deterministically (no LLM, no
+    hallucination risk); the LLM call below produces only the
+    optimized_query rewrite used for vector search.
+    """
     messages = [
         {"role": "system", "content": META_EXTRACT_PROMPT},
-        {"role": "user",   "content": user_content},
+        {"role": "user",   "content": query},
     ]
     prompt   = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     response = generate(model, tokenizer, prompt=prompt, verbose=False)
     gc.collect()
     mx.clear_cache()
 
-    meta       = parse_metadata_response(response, fallback_query=query)
-    meta["year"] = sanitize_year_extraction(meta.get("year"), query=query)
-
-    if not meta.get("ticker") and ticker_hint:
-        meta["ticker"] = ticker_hint
+    meta = parse_metadata_response(response, fallback_query=query)
+    meta["ticker"]    = extract_ticker_deterministic(query)
+    meta["year"]      = extract_year_deterministic(query)
+    meta["form_type"] = "10-k"
 
     return meta
 

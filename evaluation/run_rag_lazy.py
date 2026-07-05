@@ -21,7 +21,7 @@ sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 from search_engine import (
     search_with_payload, search_bm25, rrf_fuse, rrf_fuse_multi, generate_llm_answer,
-    search_dense_tiered, search_bm25_tiered,
+    search_dense_for_year, search_bm25_for_year,
 )
 from FinDER import run_finder
 from evaluation.section_routing import make_section_filter, section_fuse
@@ -95,7 +95,6 @@ def run_evaluation_lazy(
     levels:      list    = None,
     retrieval_modes:       list = None,
     enhance_query_flag:  bool  = False,
-    use_tiered_years:    bool  = True,
     section_alpha:       float = 0.0,
     tickers:     list    = None,
 ) -> pd.DataFrame:
@@ -143,7 +142,6 @@ def run_evaluation_lazy(
         year_val     = meta.get("year")
         base_filters = {k: meta[k] for k in ("ticker", "form_type") if meta.get(k) is not None}
         filters      = {**base_filters, "year": year_val} if year_val is not None else base_filters
-        is_tiered    = use_tiered_years and isinstance(year_val, list) and len(year_val) > 1
 
         for level in levels:
             level_cfg        = COLLECTIONS[level]
@@ -155,18 +153,12 @@ def run_evaluation_lazy(
             sparse_results = None
 
             if need_dense:
-                if is_tiered:
-                    dense_results = search_dense_tiered(coll_name_dense, query_vec, base_filters, year_val, prefetch_k)
-                else:
-                    dense_results = search_with_payload(coll_name_dense, query_vec, payload_must=filters, top_k=prefetch_k)
+                dense_results = search_dense_for_year(coll_name_dense, query_vec, base_filters, year_val, prefetch_k)
                 pts = dense_results.points if hasattr(dense_results, "points") else []
                 print(f"  [dense/{level}] {len(pts)} hits")
 
             if need_sparse:
-                if is_tiered:
-                    sparse_results = search_bm25_tiered(coll_name_bm25, query, base_filters, year_val, prefetch_k)
-                else:
-                    sparse_results = search_bm25(coll_name_bm25, query, payload_must=filters, top_k=prefetch_k)
+                sparse_results = search_bm25_for_year(coll_name_bm25, query, base_filters, year_val, prefetch_k)
                 pts = sparse_results.points if hasattr(sparse_results, "points") else []
                 print(f"  [bm25/{level}]  {len(pts)} hits")
 
@@ -269,9 +261,8 @@ def run_evaluation_lazy(
     levels_tag  = "-".join(levels).upper()
     modes_tag   = "-".join(retrieval_modes).upper()
     enh_tag     = "ENHANCED" if enhance_query_flag else "PLAIN"
-    yr_tag      = "TIERED" if use_tiered_years else "FLAT"
     sec_tag     = f"ALPHA{section_alpha}"
-    tag         = f"LAZY_{tickers_tag}_{levels_tag}_{modes_tag}_{enh_tag}_{yr_tag}_{sec_tag}"
+    tag         = f"LAZY_{tickers_tag}_{levels_tag}_{modes_tag}_{enh_tag}_{sec_tag}"
 
     n_empty = (results_df["rag_answer"] == "No relevant context retrieved.").sum()
     print(f"\n── Lazy evaluation complete ──")
@@ -294,8 +285,15 @@ def run_multi_evaluation_lazy(
     (identical to run_multi_evaluation), but precompute steps come from the dataset.
 
     All configs write into a single output JSON. Each row carries explicit config columns
-    (enhance_query_flag, use_tiered_years, section_alpha, config_key) so the
-    analysis script can group and compare configs without parsing filenames.
+    (enhance_query_flag, section_alpha, config_key) so the analysis script can
+    group and compare configs without parsing filenames.
+
+    Year filtering has no config toggle: it's a deterministic function of the
+    query's own extracted year (see extract_year_deterministic in utils.py
+    and search_dense_for_year/search_bm25_for_year in search_engine.py). An
+    explicit year (or explicit multi-year list) from the query is applied as
+    a flat, unweighted filter; a query with no year signal falls back to the
+    default 5-year window with exponential recency decay.
     """
     client  = get_qdrant_client()
     all_rows: list[dict] = []
@@ -318,16 +316,14 @@ def run_multi_evaluation_lazy(
 
         union_modes  = {m for _, cfg in cfg_group for m in cfg["retrieval_modes"]}
         union_levels = sorted({l for _, cfg in cfg_group for l in cfg["levels"]})
-        union_tiered = {cfg["use_tiered_years"] for _, cfg in cfg_group}
         need_dense   = any(m in {"dense", "hybrid"} for m in union_modes)
         need_sparse  = any(m in {"sparse", "hybrid"} for m in union_modes)
         any_section  = any(cfg.get("section_alpha", 0.0) > 0 for _, cfg in cfg_group)
 
-        def _prefetch_k_for(enhance_flag, level, use_tiered):
+        def _prefetch_k_for(enhance_flag, level):
             relevant = [cfg for _, cfg in cfg_group
                         if cfg["enhance_query_flag"] == enhance_flag
-                        and level in cfg["levels"]
-                        and cfg["use_tiered_years"] == use_tiered]
+                        and level in cfg["levels"]]
             return max(
                 (top_k * 3 if "hybrid" in cfg["retrieval_modes"] else top_k for cfg in relevant),
                 default=top_k,
@@ -351,7 +347,7 @@ def run_multi_evaluation_lazy(
                 if enh_flag:
                     print(f"  [precomp enhance] → {precomp_cache[enh_flag]['query'][:80]}...")
 
-            # Retrieval cache: (query_text, level, use_tiered) → {dense, sparse}
+            # Retrieval cache: (query_text, level) → {dense, sparse}
             # section_alpha is intentionally excluded — retrieval is shared across alpha variants
             retrieval_cache: dict[tuple, dict] = {}
             for enh_flag, pc in precomp_cache.items():
@@ -360,36 +356,28 @@ def run_multi_evaluation_lazy(
                 query_vec = pc["vec"]
                 year_val  = meta.get("year")
                 base_filt = {k: meta[k] for k in ("ticker", "form_type") if meta.get(k)}
-                filters   = {**base_filt, "year": year_val} if year_val else base_filt
 
                 for level in union_levels:
-                    for use_tiered in union_tiered:
-                        rkey = (qt, level, use_tiered)
-                        if rkey in retrieval_cache:
-                            continue
-                        is_tiered  = use_tiered and isinstance(year_val, list) and len(year_val) > 1
-                        pk         = _prefetch_k_for(enh_flag, level, use_tiered)
-                        coll_dense = COLLECTIONS[level]["coll_name"]
-                        coll_bm25  = COLLECTIONS[level]["coll_name_bm25"]
+                    rkey = (qt, level)
+                    if rkey in retrieval_cache:
+                        continue
+                    pk         = _prefetch_k_for(enh_flag, level)
+                    coll_dense = COLLECTIONS[level]["coll_name"]
+                    coll_bm25  = COLLECTIONS[level]["coll_name_bm25"]
 
-                        dense_r  = None
-                        sparse_r = None
-                        if need_dense:
-                            dense_r = (search_dense_tiered(coll_dense, query_vec, base_filt, year_val, pk)
-                                       if is_tiered else
-                                       search_with_payload(coll_dense, query_vec, payload_must=filters, top_k=pk))
-                            print(f"  [dense/{level}] {len(dense_r.points if hasattr(dense_r,'points') else [])} hits")
-                        if need_sparse:
-                            sparse_r = (search_bm25_tiered(coll_bm25, qt, base_filt, year_val, pk)
-                                        if is_tiered else
-                                        search_bm25(coll_bm25, qt, payload_must=filters, top_k=pk))
-                            print(f"  [bm25/{level}]  {len(sparse_r.points if hasattr(sparse_r,'points') else [])} hits")
+                    dense_r  = None
+                    sparse_r = None
+                    if need_dense:
+                        dense_r = search_dense_for_year(coll_dense, query_vec, base_filt, year_val, pk)
+                        print(f"  [dense/{level}] {len(dense_r.points if hasattr(dense_r,'points') else [])} hits")
+                    if need_sparse:
+                        sparse_r = search_bm25_for_year(coll_bm25, qt, base_filt, year_val, pk)
+                        print(f"  [bm25/{level}]  {len(sparse_r.points if hasattr(sparse_r,'points') else [])} hits")
 
-                        retrieval_cache[rkey] = {
-                            "dense": dense_r, "sparse": sparse_r,
-                            "is_tiered": is_tiered, "pk": pk,
-                            "use_parent_fetch": COLLECTIONS[level]["use_parent_fetch"],
-                        }
+                    retrieval_cache[rkey] = {
+                        "dense": dense_r, "sparse": sparse_r, "pk": pk,
+                        "use_parent_fetch": COLLECTIONS[level]["use_parent_fetch"],
+                    }
 
             # Section cache: (query_text, level) → {dense, sparse}
             section_cache: dict[tuple, dict] = {}
@@ -408,8 +396,7 @@ def run_multi_evaluation_lazy(
                             skey = (qt, level)
                             if skey in section_cache:
                                 continue
-                            rkey_ref = (qt, level, next(iter(union_tiered)))
-                            pk       = retrieval_cache.get(rkey_ref, {}).get("pk", top_k)
+                            pk       = retrieval_cache.get((qt, level), {}).get("pk", top_k)
                             sec_k    = max(pk // 2, top_k)
                             coll_dn  = COLLECTIONS[level]["coll_name"]
                             coll_bm  = COLLECTIONS[level]["coll_name_bm25"]
@@ -427,7 +414,7 @@ def run_multi_evaluation_lazy(
                 use_sec       = section_alpha > 0
 
                 for level in cfg["levels"]:
-                    rkey             = (qt, level, cfg["use_tiered_years"])
+                    rkey             = (qt, level)
                     rc               = retrieval_cache[rkey]
                     dense_results    = rc["dense"]
                     sparse_results   = rc["sparse"]
@@ -494,9 +481,8 @@ def run_multi_evaluation_lazy(
                             "retrieval_mode":      retrieval_mode,
                             "ticker_filter":       ticker_str,
                             "enhance_query_flag":  enh_flag,
-                            "use_tiered_years":    cfg["use_tiered_years"],
                             "section_alpha":       section_alpha,
-                            "config_key":          f"{_short_level(level)}_{retrieval_mode}_{'ENH' if enh_flag else 'PLAIN'}_{'TIERED' if cfg['use_tiered_years'] else 'FLAT'}_A{section_alpha}",
+                            "config_key":          f"{_short_level(level)}_{retrieval_mode}_{'ENH' if enh_flag else 'PLAIN'}_A{section_alpha}",
                             "query":               orig_query,
                             "query_enhanced":      pc["enhanced_query"] if enh_flag else None,
                             "category":            category,
@@ -530,10 +516,16 @@ def write_config(
     """
     Generate all permutations of evaluation configs for the given tickers.
 
-    Boolean flags (enhance_query_flag, use_tiered_years) and section_alpha
-    [0.0, 0.5, 1.0] are fully permuted (2 × 2 × 3 = 12 combinations). Each
-    value in `levels` and `retrieval_modes` is its own dimension, so the total
-    is: len(tickers) × len(levels) × len(retrieval_modes) × 12.
+    The boolean flag (enhance_query_flag) and section_alpha [0.0, 0.5, 1.0]
+    are fully permuted (2 × 3 = 6 combinations). Each value in `levels` and
+    `retrieval_modes` is its own dimension, so the total is:
+    len(tickers) × len(levels) × len(retrieval_modes) × 6.
+
+    There is no year-filtering toggle: year handling is a deterministic
+    function of the query itself (see extract_year_deterministic in
+    utils.py) -- an explicit year in the query is always respected as a flat
+    filter, and a query with no year signal always falls back to the
+    default 5-year decayed window. Neither is a config choice.
 
     section_alpha semantics:
       0.0 → no section routing (Track B only)
@@ -546,12 +538,11 @@ def write_config(
         retrieval_modes = ["hybrid", "dense", "sparse"]
 
     configs = []
-    for ticker, level, mode, enhance, tiered, alpha in product(
+    for ticker, level, mode, enhance, alpha in product(
         tickers,
         levels,
         retrieval_modes,
         [False, True],      # enhance_query_flag
-        [False, True],      # use_tiered_years
         [0.0, 0.5, 1.0],    # section_alpha: 0=off, 0.5=soft, 1=hard
     ):
         configs.append({
@@ -559,7 +550,6 @@ def write_config(
             "levels":             [level],
             "retrieval_modes":    [mode],
             "enhance_query_flag": enhance,
-            "use_tiered_years":   tiered,
             "section_alpha":      alpha,
         })
     return configs
