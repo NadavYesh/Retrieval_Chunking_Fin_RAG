@@ -346,7 +346,7 @@ def run_multi_evaluation_lazy(
             for enh_flag in {cfg["enhance_query_flag"] for _, cfg in cfg_group}:
                 precomp_cache[enh_flag] = _lookup(dataset, finder_id, ticker_str, enh_flag)
                 if enh_flag:
-                    print(f"  [precomp enhance] → {precomp_cache[enh_flag]['query'][:80]}...")
+                    print(f"  [pre computed enhanced query] → {precomp_cache[enh_flag]['query'][:80]}...")
 
             # Retrieval cache: (query_text, level) → {dense, sparse}
             # section_alpha is intentionally excluded — retrieval is shared across alpha variants
@@ -358,6 +358,7 @@ def run_multi_evaluation_lazy(
                 year_val  = meta.get("year")
                 base_filt = {k: meta[k] for k in ("ticker", "form_type") if meta.get(k)}
 
+                tag = "ENH" if enh_flag else "PLAIN"
                 for level in union_levels:
                     rkey = (qt, level)
                     if rkey in retrieval_cache:
@@ -370,10 +371,10 @@ def run_multi_evaluation_lazy(
                     sparse_r = None
                     if need_dense:
                         dense_r = search_dense_for_year(coll_dense, query_vec, base_filt, year_val, pk)
-                        print(f"  [dense/{level}] {len(dense_r.points if hasattr(dense_r,'points') else [])} hits")
+                        print(f"  [dense/{level}] {tag} {len(dense_r.points if hasattr(dense_r,'points') else [])} hits")
                     if need_sparse:
                         sparse_r = search_bm25_for_year(coll_bm25, qt, base_filt, year_val, pk)
-                        print(f"  [bm25/{level}]  {len(sparse_r.points if hasattr(sparse_r,'points') else [])} hits")
+                        print(f"  [bm25/{level}]  {tag} {len(sparse_r.points if hasattr(sparse_r,'points') else [])} hits")
 
                     retrieval_cache[rkey] = {
                         "dense": dense_r, "sparse": sparse_r, "pk": pk,
