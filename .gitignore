@@ -1,0 +1,7 @@
+__pycache__
+default.sqlite
+data
+drafts
+.DS_Store
+~$*.xlsx
+db/move_points.log

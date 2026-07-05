@@ -1,4 +1,5 @@
 import pandas as pd
+import re
 from qdrant_client import models
 from qdrant_client.models import PointStruct
 import uuid
@@ -8,6 +9,19 @@ from mlx_lm import load, generate
 from db.database import get_qdrant_client
 from prompts import RAG_ANSWER_PROMPT, META_EXTRACT_PROMPT
 from utils import parse_metadata_response
+
+_THINK_RE = re.compile(r"<think>.*?</think>", re.IGNORECASE | re.DOTALL)
+
+
+def _strip_thinking(text: str) -> str:
+    """Drop <think>...</think> reasoning blocks some models emit before the answer."""
+    stripped = _THINK_RE.sub("", text)
+    if stripped.strip():
+        return stripped
+    # Unclosed <think> (ran out of tokens mid-thought): keep whatever follows the last close tag.
+    if "</think>" in text.lower():
+        return text[text.lower().rindex("</think>") + len("</think>"):]
+    return text
 
 
 
@@ -370,7 +384,9 @@ def generate_llm_answer(user_query, search_results, model, tokenizer):
         messages, tokenize=False, add_generation_prompt=True
     )
 
-    # Generate response
-    generated_text = generate(model, tokenizer, prompt=prompt, verbose=False, max_tokens=1024)
-    
-    return generated_text.strip(), context_chunks
+    # Generate response. max_tokens is generous because thinking models burn a large
+    # chunk of the budget on reasoning before ever emitting the answer.
+    generated_text = generate(model, tokenizer, prompt=prompt, verbose=False, max_tokens=8192)
+    answer_text = _strip_thinking(generated_text)
+
+    return answer_text.strip(), context_chunks
