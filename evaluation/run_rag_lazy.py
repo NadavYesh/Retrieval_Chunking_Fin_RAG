@@ -61,7 +61,15 @@ def _short_level(level: int) -> str:
 
 
 def _lookup(dataset: pd.DataFrame, finder_id: str, ticker: str, enhance_flag: bool) -> dict:
-    """Return query text, parsed meta dict, and embedding vector from the dataset."""
+    """
+    Return query text, parsed meta dict, and embedding vector from the dataset.
+
+    meta always comes from meta_orig, regardless of enhance_flag: ticker/year/
+    form_type must never depend on query enhancement (see extract_metadata in
+    rag_functions.py), so enhancement only changes the query text used for
+    BM25 and the embedding vector used for dense search, never the metadata
+    filters.
+    """
     mask = (dataset["finder_id"] == finder_id) & (dataset["ticker"] == ticker)
     hits = dataset[mask]
     if hits.empty:
@@ -69,13 +77,12 @@ def _lookup(dataset: pd.DataFrame, finder_id: str, ticker: str, enhance_flag: bo
                        "Run build_evaluation_dataset.py first.")
     row = hits.iloc[0]
 
+    meta = json.loads(row["meta_orig"])
     if enhance_flag:
         query = row["enhanced_query"] or row["query"]
-        meta  = json.loads(row["meta_enhanced"])
         vec   = row["vec_enhanced"]
     else:
         query = row["query"]
-        meta  = json.loads(row["meta_orig"])
         vec   = row["vec_orig"]
 
     return {

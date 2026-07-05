@@ -3,6 +3,13 @@ Precomputes query enhancement, metadata extraction, and dense embeddings for Fin
 questions and saves them to a Parquet dataset. The dataset is additive: re-running
 with new tickers appends rows without recomputing existing (finder_id, ticker) pairs.
 
+Metadata (ticker/year/form_type) is always extracted from the original query --
+never the enhanced one -- so enhancement's effect stays isolated to retrieval
+(the embedding vector and BM25 query text) and never cascades into the
+metadata payload filters. meta_orig and meta_enhanced are therefore always
+identical; the column is kept for schema stability, not because the two can
+diverge.
+
 Each row also records a git snapshot (commit + dirty flag) for traceability.
 """
 
@@ -79,12 +86,13 @@ def build_dataset(
             same_text = (enhanced == orig_query)
             print(f"  [enhance] → {enhanced[:80]}...")
 
-            # 2. Metadata extraction
+            # 2. Metadata extraction -- always from the original query. Ticker/
+            # year/form_type must never depend on query enhancement, so
+            # enhancement's effect stays isolated to retrieval (embedding +
+            # BM25 text) rather than cascading into the metadata filters.
             meta_orig = extract_metadata(orig_query, gen_model, gen_tokenizer)
-            meta_enh  = meta_orig.copy() if same_text else extract_metadata(enhanced, gen_model, gen_tokenizer)
-            print(f"  [meta/orig] ticker={meta_orig.get('ticker')} year={meta_orig.get('year')}")
-            if not same_text:
-                print(f"  [meta/enh]  ticker={meta_enh.get('ticker')}  year={meta_enh.get('year')}")
+            meta_enh  = meta_orig.copy()
+            print(f"  [meta] ticker={meta_orig.get('ticker')} year={meta_orig.get('year')}")
 
             # 3. Embeddings
             vec_orig = embed_query(orig_query, embed_model, embed_tokenizer)
