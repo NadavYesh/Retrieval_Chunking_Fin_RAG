@@ -346,7 +346,7 @@ def run_multi_evaluation_lazy(
             truth_ref    = row.get("truth_ref", "")
             category     = row.get("category", "")
             query_type   = row.get("type", "")
-            print(f"\n[Q {q_idx+1}/{n_q}] {orig_query[:160]}...")
+            print(f"\n[Q {q_idx+1}/{n_q}] {orig_query}")
 
             # Build per-enhance-flag precomputed lookup (orig + enhanced variants)
             precomp_cache: dict[bool, dict] = {}
@@ -481,7 +481,7 @@ def run_multi_evaluation_lazy(
                                 wrapped    = SimpleNamespace(points=context_points)
                                 if gen_model:
                                     rag_answer, _ = generate_llm_answer(orig_query, wrapped, gen_model, gen_tokenizer)
-                                    print(f"      [gen] {len(rag_answer)} chars: {rag_answer[:80].strip()}...")
+                                    print(f"      [gen] {len(rag_answer)} chars: {rag_answer[:160].strip()}...")
                                 else:
                                     rag_answer = " NO GENERATED ANSWER "
 
