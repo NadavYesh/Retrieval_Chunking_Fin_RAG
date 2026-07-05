@@ -91,7 +91,20 @@ def build_dataset(
             # enhancement's effect stays isolated to retrieval (embedding +
             # BM25 text) rather than cascading into the metadata filters.
             meta_orig = extract_metadata(orig_query, gen_model, gen_tokenizer)
-            meta_enh  = meta_orig.copy()
+
+            # This row is specifically being evaluated against `ticker`'s 10-K
+            # (that's why run_finder was called with it) -- for multi-company
+            # comparison queries (e.g. "EA's ... impacts AAPL/GOOGL"), the
+            # deterministic extractor may correctly find a *different* ticker
+            # mentioned in the text. For evaluation rows the bucket ticker is
+            # authoritative: retrieval must target the company this row was
+            # built for, not whichever company happens to be extracted from
+            # the raw text.
+            if meta_orig.get("ticker") != ticker:
+                print(f"  [ticker override] extracted={meta_orig.get('ticker')!r} -> bucket {ticker!r}")
+                meta_orig["ticker"] = ticker
+
+            meta_enh = meta_orig.copy()
             print(f"  [meta] ticker={meta_orig.get('ticker')} year={meta_orig.get('year')}")
 
             # 3. Embeddings
