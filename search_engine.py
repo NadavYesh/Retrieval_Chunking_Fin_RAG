@@ -1,5 +1,4 @@
 import pandas as pd
-import re
 from qdrant_client import models
 from qdrant_client.models import PointStruct
 import uuid
@@ -8,20 +7,7 @@ from datetime import datetime
 from mlx_lm import load, generate
 from db.database import get_qdrant_client
 from prompts import RAG_ANSWER_PROMPT, META_EXTRACT_PROMPT
-from utils import parse_metadata_response
-
-_THINK_RE = re.compile(r"<think>.*?</think>", re.IGNORECASE | re.DOTALL)
-
-
-def _strip_thinking(text: str) -> str:
-    """Drop <think>...</think> reasoning blocks some models emit before the answer."""
-    stripped = _THINK_RE.sub("", text)
-    if stripped.strip():
-        return stripped
-    # Unclosed <think> (ran out of tokens mid-thought): keep whatever follows the last close tag.
-    if "</think>" in text.lower():
-        return text[text.lower().rindex("</think>") + len("</think>"):]
-    return text
+from utils import parse_metadata_response, year_weights, _default_year_window
 
 
 
@@ -164,7 +150,7 @@ def rrf_fuse(dense_results, sparse_results, k: int = 60, top_k: int = 6) -> list
 
 def rrf_fuse_multi(result_sets: list, k: int = 60, top_k: int = 6) -> list:
     """
-    RRF fusion over N result sets (generalisation of rrf_fuse for tiered retrieval).
+    RRF fusion over N result sets (generalisation of rrf_fuse for multi-year retrieval).
     Each element may be a QueryResponse (has .points) or a plain list of ScoredPoints.
     """
     scores: dict = {}
@@ -184,26 +170,7 @@ def rrf_fuse_multi(result_sets: list, k: int = 60, top_k: int = 6) -> list:
     return result
 
 
-def _year_weights(years: list[int]) -> list[tuple[int, float]]:
-    """
-    Assign retrieval budget weights to years using exponential decay by recency.
-    Most recent year gets the largest share of the prefetch budget.
-
-    Examples:
-      [2024]             → [(2024, 1.00)]
-      [2023, 2024]       → [(2024, 0.67), (2023, 0.33)]
-      [2022, 2023, 2024] → [(2024, 0.57), (2023, 0.29), (2022, 0.14)]
-    """
-    if not years:
-        return []
-    sorted_years = sorted(years, reverse=True)  # newest first
-    n = len(sorted_years)
-    raw = [2 ** (n - 1 - i) for i in range(n)]
-    total = sum(raw)
-    return [(yr, r / total) for yr, r in zip(sorted_years, raw)]
-
-
-def search_dense_tiered(coll_name, query_vec, base_filters, years, prefetch_k):
+def search_dense_multi_year(coll_name, query_vec, base_filters, years, prefetch_k):
     """
     Dense retrieval across multiple years with recency-weighted top_k budgets.
     Runs one search per year, RRF-fuses all results into a single QueryResponse-like object.
@@ -213,7 +180,7 @@ def search_dense_tiered(coll_name, query_vec, base_filters, years, prefetch_k):
     prefetch_k   : total candidate budget; distributed proportionally across years
     """
     from types import SimpleNamespace
-    year_wts = _year_weights(years)
+    year_wts = year_weights(years)
     result_sets = []
     for yr, w in year_wts:
         k_i = max(1, round(prefetch_k * w))
@@ -224,13 +191,13 @@ def search_dense_tiered(coll_name, query_vec, base_filters, years, prefetch_k):
     return SimpleNamespace(points=fused)
 
 
-def search_bm25_tiered(coll_name_sparse, query_text, base_filters, years, prefetch_k):
+def search_bm25_multi_year(coll_name_sparse, query_text, base_filters, years, prefetch_k):
     """
     BM25 retrieval across multiple years with recency-weighted top_k budgets.
-    Mirrors search_dense_tiered for the sparse collection.
+    Mirrors search_dense_multi_year for the sparse collection.
     """
     from types import SimpleNamespace
-    year_wts = _year_weights(years)
+    year_wts = year_weights(years)
     result_sets = []
     for yr, w in year_wts:
         k_i = max(1, round(prefetch_k * w))
@@ -239,6 +206,34 @@ def search_bm25_tiered(coll_name_sparse, query_text, base_filters, years, prefet
         result_sets.append(res)
     fused = rrf_fuse_multi(result_sets, top_k=prefetch_k)
     return SimpleNamespace(points=fused)
+
+
+def search_dense_for_year(coll_name, query_vec, base_filters, year_val, prefetch_k):
+    """
+    Resolve a query's year filter and run dense retrieval.
+
+    - year_val is None (query gave no year signal): fall back to the
+      default 5-year window (current anchor year + 4 previous, see
+      utils._default_year_window) with exponential recency decay -- the
+      system's own guess when the user wasn't specific, weighted so the
+      most recent year dominates.
+    - year_val is an int or list (explicit, deterministically extracted
+      from the query text): flat, unweighted OR filter across exactly
+      those years. We trust what the user asked for -- overriding it with
+      a recency prior would contradict an explicit request.
+    """
+    if year_val is None:
+        return search_dense_multi_year(coll_name, query_vec, base_filters, _default_year_window(), prefetch_k)
+    filters = {**base_filters, "year": year_val}
+    return search_with_payload(coll_name, query_vec, payload_must=filters, top_k=prefetch_k)
+
+
+def search_bm25_for_year(coll_name_sparse, query_text, base_filters, year_val, prefetch_k):
+    """BM25 counterpart of search_dense_for_year -- see its docstring."""
+    if year_val is None:
+        return search_bm25_multi_year(coll_name_sparse, query_text, base_filters, _default_year_window(), prefetch_k)
+    filters = {**base_filters, "year": year_val}
+    return search_bm25(coll_name_sparse, query_text, payload_must=filters, top_k=prefetch_k)
 
 
 def get_all_chunks_for_payload(coll_name, payload_must=None):
@@ -380,13 +375,13 @@ def generate_llm_answer(user_query, search_results, model, tokenizer):
         {"role": "user", "content": f"Context:\n{context_text}\n\n Question: {user_query}"}
     ]
 
+    # enable_thinking=False: with it on, this model burns thousands of tokens on a
+    # plain-text reasoning preamble (no <think> tag to strip it by) before ever
+    # emitting an answer - ~15x slower for an equivalent final answer.
     prompt = tokenizer.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True
+        messages, tokenize=False, add_generation_prompt=True, enable_thinking=False
     )
 
-    # Generate response. max_tokens is generous because thinking models burn a large
-    # chunk of the budget on reasoning before ever emitting the answer.
-    generated_text = generate(model, tokenizer, prompt=prompt, verbose=False, max_tokens=8192)
-    answer_text = _strip_thinking(generated_text)
+    generated_text = generate(model, tokenizer, prompt=prompt, verbose=False, max_tokens=2048)
 
-    return answer_text.strip(), context_chunks
+    return generated_text.strip(), context_chunks
