@@ -339,14 +339,17 @@ def run_multi_evaluation_lazy(
             truth_ref    = row.get("truth_ref", "")
             category     = row.get("category", "")
             query_type   = row.get("type", "")
-            print(f"\n[Q {q_idx+1}/{n_q}] {orig_query[:80]}...")
+            print(f"\n[Q {q_idx+1}/{n_q}] {orig_query[:160]}...")
 
             # Build per-enhance-flag precomputed lookup (orig + enhanced variants)
             precomp_cache: dict[bool, dict] = {}
             for enh_flag in {cfg["enhance_query_flag"] for _, cfg in cfg_group}:
                 precomp_cache[enh_flag] = _lookup(dataset, finder_id, ticker_str, enh_flag)
+                pc  = precomp_cache[enh_flag]
+                tag = "ENH" if enh_flag else "PLAIN"
                 if enh_flag:
-                    print(f"  [pre computed enhanced query] → {precomp_cache[enh_flag]['query'][:80]}...")
+                    print(f"  [pre computed enhanced query] → {pc['query'][:160]}...")
+                print(f"  [meta/{tag}] ticker={pc['meta'].get('ticker')} year={pc['meta'].get('year')}")
 
             # Retrieval cache: (query_text, level) → {dense, sparse}
             # section_alpha is intentionally excluded — retrieval is shared across alpha variants
