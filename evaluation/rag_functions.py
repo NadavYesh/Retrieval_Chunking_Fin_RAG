@@ -42,7 +42,13 @@ def enhance_query(query: str, model, tokenizer) -> str:
         {"role": "system", "content": QUERY_ENHANCEMENT_PROMPT},
         {"role": "user",   "content": query},
     ]
-    formatted = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    # enable_thinking=False: some models (e.g. Qwen3.5) burn thousands of tokens
+    # on a plain-text reasoning preamble otherwise -- see the identical fix in
+    # search_engine.py:generate_llm_answer. Harmless no-op for chat templates
+    # that don't reference this variable (e.g. Llama's).
+    formatted = tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True, enable_thinking=False
+    )
 
     for attempt in range(1, MAX_ENHANCE_RETRIES + 1):
         print(f"*****************************\n\nThe raw user query is {query}")
@@ -68,7 +74,9 @@ def extract_metadata(query: str, model, tokenizer) -> dict:
         {"role": "system", "content": META_EXTRACT_PROMPT},
         {"role": "user",   "content": query},
     ]
-    prompt   = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    prompt   = tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True, enable_thinking=False
+    )
     response = generate(model, tokenizer, prompt=prompt, verbose=False)
     gc.collect()
     mx.clear_cache()
