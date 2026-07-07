@@ -24,7 +24,9 @@ from search_engine import (
 )
 from FinDER import run_finder
 from evaluation.section_routing import make_section_filter, section_fuse
-from evaluation.build_evaluation_dataset import DATASET_PATH, load_dataset
+from evaluation.build_evaluation_dataset import load_dataset
+
+DATASET_PATH = "/Users/nadavsmacbookair/Desktop/Thesis/data/eval_dataset/limited-new-precomputed-qwen.parquet"
 from db.database import get_qdrant_client
 
 # Keyed by the meaningful choice (chunking level 1/2/3), not by the verbose
@@ -93,192 +95,6 @@ def _lookup(dataset: pd.DataFrame, finder_id: str, ticker: str, enhance_flag: bo
     }
 
 
-# def run_evaluation_lazy(
-#     finder_df:           pd.DataFrame,
-#     dataset:             pd.DataFrame,
-#     gen_model,
-#     gen_tokenizer,
-#     output_dir:  str     = "/Users/nadavsmacbookair/Desktop/Thesis/data/eval_results",
-#     top_k:       int     = 5,
-#     levels:      list    = None,
-#     retrieval_modes:       list = None,
-#     enhance_query_flag:  bool  = False,
-#     section_alpha:       float = 0.0,
-#     tickers:     list    = None,
-# ) -> pd.DataFrame:
-#     if levels is None:
-#         levels = list(COLLECTIONS.keys())
-#     if isinstance(levels, str):
-#         levels = [levels]
-#     if retrieval_modes is None:
-#         retrieval_modes = ["dense"]
-#     if isinstance(retrieval_modes, str):
-#         retrieval_modes = [retrieval_modes]
-#     unknown = set(retrieval_modes) - VALID_MODES
-#     if unknown:
-#         raise ValueError(f"Unknown retrieval_modes: {unknown}")
-#     if finder_df.empty:
-#         print("No FinDER questions found.")
-#         return pd.DataFrame()
-
-#     client      = get_qdrant_client()
-#     need_dense  = any(m in {"dense", "hybrid"} for m in retrieval_modes)
-#     need_sparse = any(m in {"sparse", "hybrid"} for m in retrieval_modes)
-#     prefetch_k  = top_k * 3 if "hybrid" in retrieval_modes else top_k
-
-#     ticker_str = (tickers[0] if tickers and len(tickers) == 1 else "multi")
-#     results_list = []
-
-#     for q_idx, (_, row) in enumerate(finder_df.iterrows()):
-#         finder_id    = row.get("_id", "")
-#         orig_query   = row.get("query", "")
-#         truth_answer = row.get("truth_answer", "")
-#         truth_ref    = row.get("truth_ref", "")
-#         category     = row.get("category", "")
-#         query_type   = row.get("type", "")
-#         print(f"\n[Original Query {q_idx+1}/{len(finder_df)}] {orig_query[:80]}...")
-
-#         precomp = _lookup(dataset, finder_id, ticker_str, enhance_query_flag)
-#         query       = precomp["query"]
-#         meta        = precomp["meta"]
-#         query_vec   = precomp["vec"]
-#         enh_display = precomp["enhanced_query"]
-#         if enhance_query_flag:
-#             print(f"  [precomp enhance] → {query[:80]}...")
-#         print(f"  [precomp meta] ticker={meta.get('ticker')} year={meta.get('year')}")
-
-#         year_val     = meta.get("year")
-#         base_filters = {k: meta[k] for k in ("ticker", "form_type") if meta.get(k) is not None}
-#         filters      = {**base_filters, "year": year_val} if year_val is not None else base_filters
-
-#         for level in levels:
-#             level_cfg        = COLLECTIONS[level]
-#             coll_name_dense  = level_cfg["coll_name"]
-#             coll_name_bm25   = level_cfg["coll_name_bm25"]
-#             use_parent_fetch = level_cfg["use_parent_fetch"]
-
-#             dense_results  = None
-#             sparse_results = None
-
-#             if need_dense:
-#                 dense_results = search_dense_for_year(coll_name_dense, query_vec, base_filters, year_val, prefetch_k)
-#                 pts = dense_results.points if hasattr(dense_results, "points") else []
-#                 print(f"  [dense/{level}] {len(pts)} hits")
-
-#             if need_sparse:
-#                 sparse_results = search_bm25_for_year(coll_name_bm25, query, base_filters, year_val, prefetch_k)
-#                 pts = sparse_results.points if hasattr(sparse_results, "points") else []
-#                 print(f"  [bm25/{level}]  {len(pts)} hits")
-
-#             sec_dense_results  = None
-#             sec_sparse_results = None
-#             if section_alpha > 0:
-#                 sec_filter = make_section_filter(category)
-#                 if sec_filter:
-#                     sec_k = max(prefetch_k // 2, top_k)
-#                     if need_dense:
-#                         sec_dense_results = search_with_payload(
-#                             coll_name_dense, query_vec, payload_must=filters,
-#                             top_k=sec_k, extra_filter=sec_filter,
-#                         )
-#                     if need_sparse:
-#                         sec_sparse_results = search_bm25(
-#                             coll_name_bm25, query, payload_must=filters,
-#                             top_k=sec_k, extra_filter=sec_filter,
-#                         )
-
-#             for retrieval_mode in retrieval_modes:
-#                 run_id         = f"{meta.get('ticker','?')}_{meta.get('year','?')}_{level}_{retrieval_mode}_{q_idx}"
-#                 context_points = []
-#                 rag_answer     = ""
-#                 try:
-#                     use_sec = section_alpha > 0
-#                     if retrieval_mode == "dense":
-#                         track_b = dense_results.points if hasattr(dense_results, "points") else []
-#                         if use_sec and sec_dense_results is not None:
-#                             track_a        = sec_dense_results.points if hasattr(sec_dense_results, "points") else []
-#                             context_points = section_fuse(track_a, track_b, section_alpha, top_k)
-#                         else:
-#                             context_points = track_b[:top_k]
-#                     elif retrieval_mode == "sparse":
-#                         track_b = sparse_results.points if hasattr(sparse_results, "points") else []
-#                         if use_sec and sec_sparse_results is not None:
-#                             track_a        = sec_sparse_results.points if hasattr(sec_sparse_results, "points") else []
-#                             context_points = section_fuse(track_a, track_b, section_alpha, top_k)
-#                         else:
-#                             context_points = track_b[:top_k]
-#                     elif retrieval_mode == "hybrid":
-#                         track_b = rrf_fuse(dense_results, sparse_results, top_k=prefetch_k)
-#                         if use_sec:
-#                             sec_parts = [r for r in [sec_dense_results, sec_sparse_results] if r is not None]
-#                             if sec_parts:
-#                                 track_a = rrf_fuse_multi(sec_parts, top_k=prefetch_k) if len(sec_parts) > 1 else (
-#                                     sec_parts[0].points if hasattr(sec_parts[0], "points") else []
-#                                 )
-#                                 context_points = section_fuse(track_a, track_b, section_alpha, top_k)
-#                             else:
-#                                 context_points = track_b[:top_k]
-#                         else:
-#                             context_points = track_b[:top_k]
-
-#                     if use_parent_fetch and context_points:
-#                         parent_ids = list({p.payload.get("parent_id") for p in context_points if p.payload.get("parent_id")})
-#                         if parent_ids:
-#                             fetch_coll = PARENT_COLL_BM25 if retrieval_mode == "sparse" else PARENT_COLL_DENSE
-#                             context_points = client.retrieve(fetch_coll, ids=parent_ids, with_payload=True)
-
-#                     if not context_points:
-#                         rag_answer = "No relevant context retrieved."
-#                     else:
-#                         wrapped    = SimpleNamespace(points=context_points)
-#                         if gen_model:
-#                             rag_answer, _ = generate_llm_answer(orig_query, wrapped, gen_model, gen_tokenizer)
-#                             print(f"    [gen] {len(rag_answer)} chars: {rag_answer[:80].strip()}...")
-#                         else:
-#                             rag_answer = " NO GENERATED ANSWER "
-
-
-#                 except Exception as e:
-#                     print(f"    [ERROR] {retrieval_mode}: {e}")
-
-#                 rag_ret = "".join(
-#                     f"======================\nSource Number {p_n}\n {p}"
-#                     for p_n, p in enumerate(context_points)
-#                 )
-#                 results_list.append({
-#                     "finder_id":      finder_id,
-#                     "run_id":         run_id,
-#                     "level":          level,
-#                     "retrieval_mode": retrieval_mode,
-#                     "query":          orig_query,
-#                     "query_enhanced": enh_display if enhance_query_flag else None,
-#                     "category":       category,
-#                     "query_type":     query_type,
-#                     "truth_answer":   truth_answer,
-#                     "truth_ref":      truth_ref,
-#                     "rag_answer":     rag_answer,
-#                     "rag_retrieved":  rag_ret,
-#                 })
-
-#     client.close()
-#     Path(output_dir).mkdir(parents=True, exist_ok=True)
-#     ts         = datetime.now().strftime("%Y%m%d_%H%M")
-#     results_df = pd.DataFrame(results_list)
-
-#     tickers_tag = "-".join(t.upper() for t in sorted(tickers)) if tickers else "ALL"
-#     levels_tag  = "-".join(_short_level(l) for l in levels)
-#     modes_tag   = "-".join(retrieval_modes).upper()
-#     enh_tag     = "ENHANCED" if enhance_query_flag else "PLAIN"
-#     sec_tag     = f"ALPHA{section_alpha}"
-#     tag         = f"LAZY_{tickers_tag}_{levels_tag}_{modes_tag}_{enh_tag}_{sec_tag}"
-
-#     n_empty = (results_df["rag_answer"] == "No relevant context retrieved.").sum()
-#     print(f"\n── Lazy evaluation complete ──")
-#     print(f"  Total: {len(results_df)} | Empty: {n_empty}")
-#     results_df.to_json(f"{output_dir}/{tag}_eval_{ts}.json")
-#     print(f"  Saved → {output_dir}/{tag}_eval_{ts}.json")
-#     return results_df
-
 
 def run_multi_evaluation_lazy(
     configs:         list[dict],
@@ -322,22 +138,25 @@ def run_multi_evaluation_lazy(
         n_q = len(finder_df)
         print(f"\n{'='*60}\nTicker group: {tickers}  |  {n_q} questions  |  {len(cfg_group)} config(s)\n{'='*60}")
 
+        # the union variables contain things that can run together. 
         union_modes  = {m for _, cfg in cfg_group for m in cfg["retrieval_modes"]}
         union_levels = sorted({l for _, cfg in cfg_group for l in cfg["levels"]})
         need_dense   = any(m in {"dense", "hybrid"} for m in union_modes)
         need_sparse  = any(m in {"sparse", "hybrid"} for m in union_modes)
-        any_section  = any(cfg.get("section_alpha", 0.0) > 0 for _, cfg in cfg_group)
+        any_section  = any(cfg.get("section_alpha", 0.0) > 0 for _, cfg in cfg_group) # for section routing
 
         def _prefetch_k_for(enhance_flag, level):
             relevant = [cfg for _, cfg in cfg_group
                         if cfg["enhance_query_flag"] == enhance_flag
                         and level in cfg["levels"]]
+            # if dense of sparse, we use top k. otherwise, multiply by 3
+            # why?
             return max(
-                (top_k * 3 if "hybrid" in cfg["retrieval_modes"] else top_k for cfg in relevant),
+                (top_k * 3 if "hybrid" in cfg["retrieval_modes"] else top_k for cfg in relevant), 
                 default=top_k,
             )
 
-        ticker_str = tickers[0] if len(tickers) == 1 else "multi"
+        ticker_str = tickers[0] if len(tickers) == 1 else "multi" # all thesis cases are single.
 
         for q_idx, (_, row) in enumerate(finder_df.iterrows()):
             finder_id    = row.get("_id", "")
@@ -428,7 +247,8 @@ def run_multi_evaluation_lazy(
                 for level in cfg["levels"]:
                     rkey             = (qt, level)
                     rc               = retrieval_cache[rkey]
-                    dense_results    = rc["dense"]
+                    # compute results per level
+                    dense_results    = rc["dense"] 
                     sparse_results   = rc["sparse"]
                     use_parent_fetch = rc["use_parent_fetch"]
                     pk_cached        = rc["pk"]
