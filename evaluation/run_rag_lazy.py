@@ -7,6 +7,7 @@ Interface mirrors run_rag.py so configs are interchangeable.
 """
 
 import json
+import os
 from collections import defaultdict
 from itertools import product
 from datetime import datetime
@@ -121,6 +122,22 @@ def run_multi_evaluation_lazy(
     client  = get_qdrant_client()
     all_rows: list[dict] = []
     ts = datetime.now().strftime("%Y%m%d_%H%M")
+
+    # ── Checkpointing ──────────────────────────────────────────────────────────
+    # out_path is fixed up front (not just computed at the end) so every question's
+    # checkpoint write lands at the same, final path. Write-then-rename makes each
+    # checkpoint atomic: a crash mid-write leaves the previous good checkpoint in
+    # place at out_path rather than a truncated/corrupt file, so at most one
+    # question's worth of rows is ever at risk of being lost, not the whole run.
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    tickers_all = sorted({cfg["tickers"][0] for cfg in configs})
+    tag         = "-".join(t.upper() for t in tickers_all)
+    out_path    = f"{output_dir}/eval_multi_{tag}_{ts}.json"
+
+    def _checkpoint() -> None:
+        tmp_path = f"{out_path}.tmp"
+        pd.DataFrame(all_rows).to_json(tmp_path)
+        os.replace(tmp_path, out_path)
 
     ticker_groups: dict[tuple, list[tuple[int, dict]]] = defaultdict(list)
     for i, cfg in enumerate(configs):
@@ -360,14 +377,14 @@ def run_multi_evaluation_lazy(
                         "rag_retrieved":       entry["rag_ret"],
                     })
 
+            # ── Checkpoint after every question — crash-safe, resumable up to here ──
+            _checkpoint()
+            print(f"      [checkpoint] {len(all_rows)} row(s) saved → {out_path}")
+
     client.close()
 
-    Path(output_dir).mkdir(parents=True, exist_ok=True)
-    tickers_all = sorted({cfg["tickers"][0] for cfg in configs})
-    tag         = "-".join(t.upper() for t in tickers_all)
-    out_path    = f"{output_dir}/eval_multi_{tag}_{ts}.json"
-    results_df  = pd.DataFrame(all_rows)
-    results_df.to_json(out_path)
+    _checkpoint()
+    results_df = pd.DataFrame(all_rows)
     n_empty = (results_df["rag_answer"] == "No relevant context retrieved.").sum()
     print(f"\n── Multi eval complete ──")
     print(f"  Total rows: {len(all_rows)} | Empty: {n_empty} | Configs: {len(configs)}")
@@ -436,7 +453,8 @@ if __name__ == "__main__":
     configs = [
         #write_config(tickers=["pypl"], levels=LEVELS, retrieval_modes=["hybrid","sparse"], enhance_query_flag = [True, False], section_alpha = [0 ,1]),
         #write_config(tickers=["tsla"], levels=LEVELS, retrieval_modes=["hybrid","dense","sparse"], enhance_query_flag = [True, False], section_alpha = [0 ,1]),
-        write_config(tickers=["tsla"], levels=[1], retrieval_modes=["sparse"], enhance_query_flag = [False], section_alpha = [0,1]),
+        # write_config(tickers=["tsla"], levels=[1], retrieval_modes=["sparse"], enhance_query_flag = [False], section_alpha = [0,1]),
+        write_config(tickers=["tsla","pypl","aapl","nvda"], levels=LEVELS, retrieval_modes=["sparse","dense","hybrid"], enhance_query_flag = [True,False], section_alpha = [0,1]),
     
     ]
     print(f"Running {len(configs)} configs...")

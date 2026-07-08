@@ -886,7 +886,6 @@ def judge_llm(question: str, truth_answer: str, rag_answer: str, baseline_answer
         answer_a=rag_answer,
         answer_b=baseline_answer,
     )
-    breakpoint()
     messages  = [{"role": "user", "content": prompt_text}]
     formatted = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     response  = generate(model, tokenizer, prompt=formatted, verbose=False)
@@ -1953,7 +1952,7 @@ def main():
     USE_LLM_JUDGE = True
 
     eval_files = [
-        "/Users/nadavsmacbookair/Desktop/Thesis/data/eval_results/eval_multi_TSLA_20260708_merged_1413_1437.json",
+        "/Users/nadavsmacbookair/Desktop/Thesis/data/eval_results/eval_multi_TSLA_20260708_1815.json",
     ]
 
     print(f"Corpus dir: {CHUNKS_DIR}")
