@@ -864,14 +864,38 @@ def judge_lexical(rag_answer: str, truth_answer: str) -> dict:
     }
 
 
+def _should_swap(*key_parts: str) -> bool:
+    """
+    Deterministic pseudo-random coin flip for one judge comparison, used to decide
+    whether rag_answer/baseline_answer get swapped into prompt slots A/B.
+
+    Hash-based (not random.seed()) so the same (question, truth_answer, rag_answer,
+    baseline_answer) tuple always swaps the same way across reruns — required for
+    _judge_unjudged_rows's resumability and for _judge_unjudged_rows_deduped, where
+    a dedup group's shared verdict must correspond to one consistent prompt layout.
+    """
+    digest = hashlib.md5("||".join(key_parts).encode("utf-8")).digest()
+    return digest[0] & 1 == 1
+
+
+def _unswap_verdict(value: str) -> str:
+    """Map a raw A/B judge verdict back to A=rag_answer/B=baseline_answer terms."""
+    return {"A": "B", "B": "A"}.get(value, value)
+
+
 def judge_llm(question: str, truth_answer: str, rag_answer: str, baseline_answer: str, model, tokenizer) -> dict:
     """
-    LLM-based judge using JUDGE_PROMPT. Pairwise-compares rag_answer (A) against
-    baseline_answer (B) on relevance and completeness relative to the ground truth.
+    LLM-based judge using JUDGE_PROMPT. Pairwise-compares rag_answer against
+    baseline_answer on relevance and completeness relative to the ground truth.
 
     Uses Phi-4 (`mlx-community/phi-4-4bit`) — a different architecture and training
     from Llama-3.2-3B (the generation model) — which eliminates self-serving bias.
     Runs post-hoc from saved eval JSON; no concurrency conflict with generation.
+
+    Which answer is physically placed in prompt slot A vs B is randomized per call
+    (see _should_swap) to mitigate the judge's positional/order bias. The returned
+    relevance/completeness are flipped back before returning, so callers always see
+    them in "A=rag_answer, B=baseline_answer" terms regardless of prompt order.
 
     Returns relevance, completeness ("A"/"B" strings — which answer won),
     and judge_response (full raw model output for inspection).
@@ -880,17 +904,22 @@ def judge_llm(question: str, truth_answer: str, rag_answer: str, baseline_answer
     from prompts import JUDGE_PROMPT
     from mlx_lm import generate
 
+    swapped = _should_swap(question, truth_answer, rag_answer, baseline_answer)
     prompt_text = JUDGE_PROMPT.format(
         question=question,
         answer_ref=truth_answer,
-        answer_a=rag_answer,
-        answer_b=baseline_answer,
+        answer_a=baseline_answer if swapped else rag_answer,
+        answer_b=rag_answer if swapped else baseline_answer,
     )
     messages  = [{"role": "user", "content": prompt_text}]
     formatted = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     response  = generate(model, tokenizer, prompt=formatted, verbose=False, max_tokens=1000)
 
-    return _parse_judge_response(response)
+    result = _parse_judge_response(response)
+    if swapped:
+        result["relevance"]    = _unswap_verdict(result["relevance"])
+        result["completeness"] = _unswap_verdict(result["completeness"])
+    return result
 
 
 def _parse_judge_response(response: str) -> dict:
@@ -929,6 +958,10 @@ def judge_llm_batch(
     these caps concurrency (and memory) without changing how many items are
     logically judged in one call.
 
+    Same per-item A/B randomization as judge_llm (see _should_swap): each item's
+    prompt independently gets rag_answer/baseline_answer swapped or not, and each
+    result is flipped back to "A=rag_answer, B=baseline_answer" terms before return.
+
     Returns a list of score-dicts (same shape as judge_llm's return: relevance,
     completeness, judge_response), one per item, in the same order as `items`.
     """
@@ -936,13 +969,18 @@ def judge_llm_batch(
     from prompts import JUDGE_PROMPT
     from mlx_lm import batch_generate
 
+    swaps = [
+        _should_swap(question, truth_answer, rag_answer, baseline_answer)
+        for question, truth_answer, rag_answer, baseline_answer in items
+    ]
+
     prompts_text = []
-    for question, truth_answer, rag_answer, baseline_answer in items:
+    for (question, truth_answer, rag_answer, baseline_answer), swapped in zip(items, swaps):
         prompt_text = JUDGE_PROMPT.format(
             question=question,
             answer_ref=truth_answer,
-            answer_a=rag_answer,
-            answer_b=baseline_answer,
+            answer_a=baseline_answer if swapped else rag_answer,
+            answer_b=rag_answer if swapped else baseline_answer,
         )
         messages = [{"role": "user", "content": prompt_text}]
         prompts_text.append(
@@ -958,7 +996,12 @@ def judge_llm_batch(
         model, tokenizer, token_prompts, max_tokens=max_tokens, verbose=True,
         completion_batch_size=completion_batch_size, prefill_batch_size=prefill_batch_size,
     )
-    return [_parse_judge_response(response) for response in batch.texts]
+    results = [_parse_judge_response(response) for response in batch.texts]
+    for result, swapped in zip(results, swaps):
+        if swapped:
+            result["relevance"]    = _unswap_verdict(result["relevance"])
+            result["completeness"] = _unswap_verdict(result["completeness"])
+    return results
 
 
 def _judge_unjudged_rows(rows_df: pd.DataFrame, judge_model, judge_tok) -> pd.DataFrame:
