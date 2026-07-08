@@ -27,6 +27,7 @@ Usage:
 """
 
 import contextlib
+import hashlib
 import io
 import json
 import math
@@ -495,6 +496,10 @@ def analyze_entry(idx: str, data: dict, corpus: pd.DataFrame, fp_index: dict,
         # ─── Retrieval volume ──────────────────────────────────────────────────
         # Total chunks returned by the retriever (dense / sparse / hybrid)
         "n_retrieved":         n_retrieved_total,
+        # Ordered chunk-id identity of this row's retrieval, pipe-joined so it's
+        # hashable/groupable and Excel-safe (used to detect overlapping retrieval
+        # across configs for the same question — see _find_overlap_groups).
+        "retrieved_ids":       "|".join(retrieved_ids),
 
         # ─── Section diversity ─────────────────────────────────────────────────
         # Count of distinct (section, subsection) pairs in the top-k.
@@ -744,6 +749,74 @@ def print_summary(rows: list[dict]) -> None:
 BASELINE_CONFIG_KEY = "L1_BM25_PLAIN_A0"
 
 
+def _find_overlap_groups(records: list[dict]) -> list[dict]:
+    """
+    Group rows whose retrieval is EXACTLY identical (same question, same ordered
+    retrieved chunk list) across different configs.
+
+    Buckets by (finder_id, ticker_filter, retrieved_ids); only buckets with ≥2
+    members and a non-empty retrieved_ids count as an overlap (rows that both
+    retrieved nothing aren't a meaningful "overlap"). Returns [] immediately if
+    "retrieved_ids" isn't present in the records — lets callers degrade
+    gracefully on pickles saved before this field existed.
+
+    Each group dict:
+      member_idxs   — record-index labels (the actual DataFrame index / list
+                       position of each member — required for later .at[] writes)
+      canonical_idx — the baseline row if config_key == BASELINE_CONFIG_KEY is in
+                       the group, else the member with the lexicographically
+                       smallest (config_key, position) — deterministic, and the
+                       position tiebreak guards against literal duplicate rows
+                       in merged eval JSONs.
+      answers_match — True only if every member's rag_answer is byte-identical.
+                       This is the "avoid corruption" gate: callers must only
+                       share a judge verdict across a group when this is True.
+      contains_baseline, config_keys, n_configs, finder_id, category, query,
+      ticker_filter, n_retrieved — for the overlapping_context report sheet.
+    """
+    if not records or "retrieved_ids" not in records[0]:
+        return []
+
+    buckets: dict[tuple, list[int]] = {}
+    for i, row in enumerate(records):
+        retrieved_ids = row.get("retrieved_ids", "")
+        if not retrieved_ids:
+            continue
+        key = (row.get("finder_id"), row.get("ticker_filter"), retrieved_ids)
+        buckets.setdefault(key, []).append(i)
+
+    groups = []
+    for (finder_id, ticker_filter, retrieved_ids), idxs in buckets.items():
+        if len(idxs) < 2:
+            continue
+
+        answers = {records[i].get("rag_answer") for i in idxs}
+        answers_match = len(answers) == 1
+
+        baseline_member = next(
+            (i for i in idxs if records[i].get("config_key") == BASELINE_CONFIG_KEY), None
+        )
+        canonical_idx = baseline_member if baseline_member is not None else min(
+            idxs, key=lambda i: (str(records[i].get("config_key")), i)
+        )
+
+        groups.append({
+            "finder_id":       finder_id,
+            "ticker_filter":   ticker_filter,
+            "retrieved_ids":   retrieved_ids,
+            "member_idxs":     idxs,
+            "canonical_idx":   canonical_idx,
+            "answers_match":   answers_match,
+            "contains_baseline": baseline_member is not None,
+            "config_keys":     [records[i].get("config_key") for i in idxs],
+            "n_configs":       len(idxs),
+            "category":        records[canonical_idx].get("category"),
+            "query":           records[canonical_idx].get("query"),
+            "n_retrieved":     records[canonical_idx].get("n_retrieved"),
+        })
+    return groups
+
+
 def _attach_baseline_answers(rows: list[dict]) -> None:
     """
     Fetch each row's baseline_answer: the rag_answer from the fixed baseline
@@ -886,6 +959,74 @@ def _judge_unjudged_rows(rows_df: pd.DataFrame, judge_model, judge_tok) -> pd.Da
         sys.stdout.flush()
     if len(todo):
         print()
+    return rows_df
+
+
+_PENDING_DUP_COPY = "__pending_dup_copy__"
+
+
+def _judge_unjudged_rows_deduped(rows_df: pd.DataFrame, judge_model, judge_tok) -> pd.DataFrame:
+    """
+    Same contract as _judge_unjudged_rows, but shares one verdict across rows whose
+    retrieval is exactly identical for the same question (see _find_overlap_groups),
+    instead of calling judge_llm redundantly for each.
+
+    Only ever acts on a row whose relevance is currently null — never overwrites an
+    already-judged row (real verdict or sentinel), whether judged in this call or a
+    prior run. This is what makes it safe to call repeatedly / resume from a
+    partially-judged pickle without corrupting existing results.
+
+    For an eligible group (answers_match=True — every member's rag_answer is
+    byte-identical, so a shared verdict is actually correct, not just assumed):
+      - if the canonical member IS the baseline row, every other (currently-null)
+        member gets the "same_as_baseline" sentinel directly — comparing an answer
+        to itself is meaningless, so it's never sent to judge_llm.
+      - otherwise, every other (currently-null) member gets a temporary placeholder
+        so _judge_unjudged_rows's own null-check skips it (letting the canonical
+        member get judged for real, exactly once), then the placeholder is replaced
+        with the canonical's real verdict once judging completes.
+
+    Groups where answers_match is False (retrieval coincided but the generated
+    answers differ — an edge case worth surfacing, not silently trusting) get NO
+    dedup treatment: every member is still judged independently, same as today.
+    """
+    groups = _find_overlap_groups(rows_df.reset_index().to_dict("records"))
+    eligible = [g for g in groups if g["answers_match"]]
+
+    # Ensure the judge columns exist before writing to them — mirrors the same
+    # column-creation _judge_unjudged_rows does internally, needed here because we
+    # may pre-populate sentinels/placeholders before that function ever runs.
+    for col in ("judge_response", "relevance", "completeness"):
+        if col not in rows_df.columns:
+            rows_df[col] = None
+
+    pending_placeholders: list[int] = []
+    for g in eligible:
+        canon = g["canonical_idx"]
+        canon_is_baseline = rows_df.at[canon, "config_key"] == BASELINE_CONFIG_KEY
+        for m in g["member_idxs"]:
+            if m == canon:
+                continue
+            if pd.notna(rows_df.at[m, "relevance"]):
+                continue  # already judged (this run or a prior one) — never touch it
+            if canon_is_baseline:
+                rows_df.at[m, "relevance"]      = "same_as_baseline"
+                rows_df.at[m, "completeness"]   = "same_as_baseline"
+                rows_df.at[m, "judge_response"] = ""
+            else:
+                rows_df.at[m, "relevance"]    = _PENDING_DUP_COPY
+                rows_df.at[m, "completeness"] = _PENDING_DUP_COPY
+                pending_placeholders.append(m)
+
+    rows_df = _judge_unjudged_rows(rows_df, judge_model, judge_tok)
+
+    for g in eligible:
+        canon = g["canonical_idx"]
+        for m in g["member_idxs"]:
+            if m in pending_placeholders:
+                for col in ("relevance", "completeness", "judge_response"):
+                    rows_df.at[m, col] = rows_df.at[canon, col]
+
     return rows_df
 
 
@@ -1129,6 +1270,9 @@ def _write_multi_excel(rows_df: pd.DataFrame, out_path: Path) -> None:
         # ── Sheet 9: section_routing ──────────────────────────────────────────
         _write_section_routing_sheet(df, writer)
 
+        # ── Sheet 10: overlapping_context ──────────────────────────────────────
+        _write_overlap_sheet(df, writer)
+
     print(f"Saved → {out_path}")
 
 
@@ -1165,8 +1309,22 @@ def run_multi_analysis(
         sys.stdout.flush()
     print()
 
-    for row in rows:
-        row.update(judge_lexical(row.get("rag_answer", ""), row.get("truth_answer", "")))
+    # ── Lexical judge — skip rows that overlap another row's exact retrieval; ──
+    # ── copy that row's (already-computed) score instead of recomputing it.    ──
+    overlap_groups = _find_overlap_groups(rows)
+    eligible_groups = [g for g in overlap_groups if g["answers_match"]]
+    lex_dup_map = {
+        m: g["canonical_idx"]
+        for g in eligible_groups
+        for m in g["member_idxs"]
+        if m != g["canonical_idx"]
+    }
+    for i, row in enumerate(rows):
+        if i not in lex_dup_map:
+            row.update(judge_lexical(row.get("rag_answer", ""), row.get("truth_answer", "")))
+    for dup_i, canon_i in lex_dup_map.items():
+        for k in ("lex_word_recall", "lex_num_recall", "lex_hit"):
+            rows[dup_i][k] = rows[canon_i][k]
 
     # ── Baseline answer — fetched from the matching baseline-config row, if present ──
     _attach_baseline_answers(rows)
@@ -1175,7 +1333,7 @@ def run_multi_analysis(
 
     # ── LLM judge — optional, runs inline as part of the same pass ──────────────
     if judge_model is not None:
-        rows_df = _judge_unjudged_rows(rows_df, judge_model, judge_tok)
+        rows_df = _judge_unjudged_rows_deduped(rows_df, judge_model, judge_tok)
 
     out_dir  = eval_path.parent / "analysis"
     out_xlsx = out_dir / eval_path.name.replace("eval_", "analysis_").replace(".json", ".xlsx")
@@ -1202,7 +1360,7 @@ def apply_llm_judge(analysis_pkl: Path, judge_model, judge_tok) -> pd.DataFrame:
     """
     print(f"\nAnalysis pickle : {analysis_pkl}")
     rows_df = pd.read_pickle(analysis_pkl)
-    rows_df = _judge_unjudged_rows(rows_df, judge_model, judge_tok)
+    rows_df = _judge_unjudged_rows_deduped(rows_df, judge_model, judge_tok)
 
     rows_df.to_pickle(analysis_pkl)
     out_xlsx = analysis_pkl.with_suffix(".xlsx")
@@ -1742,6 +1900,45 @@ def _write_section_routing_sheet(df: pd.DataFrame, writer: "pd.ExcelWriter") -> 
     pd.concat(frames, ignore_index=True).to_excel(
         writer, sheet_name="section_routing", index=False
     )
+
+
+def _write_overlap_sheet(df: pd.DataFrame, writer: "pd.ExcelWriter") -> None:
+    """
+    Sheet 10: overlapping_context
+    One row PER overlap group PER finder_id (not per member row) — i.e. if 3 configs
+    for the same question retrieved the exact same ordered chunk list, that's one
+    row here listing all 3 config_keys, not 3 rows. A finder_id with two unrelated
+    overlap clusters gets two rows. Sorted by finder_id.
+
+    Shows ALL groups found, including answers_match=False ones (retrieval coincided
+    but the generated answers differ anyway) — those are diagnostically important
+    and are NOT judge/lexical-deduped elsewhere, so they must stay visible here.
+    """
+    groups = _find_overlap_groups(df.reset_index().to_dict("records"))
+    if not groups:
+        return
+
+    groups = sorted(groups, key=lambda g: str(g["finder_id"]))
+    rows = []
+    group_counter: dict[str, int] = {}
+    for g in groups:
+        fid = str(g["finder_id"])
+        group_counter[fid] = group_counter.get(fid, 0) + 1
+        rows.append({
+            "finder_id":         g["finder_id"],
+            "group_id":          f"{fid}_g{group_counter[fid]}",
+            "category":          g["category"],
+            "query":             g["query"],
+            "ticker_filter":     g["ticker_filter"],
+            "n_configs":         g["n_configs"],
+            "config_keys":       ", ".join(str(c) for c in g["config_keys"]),
+            "contains_baseline": g["contains_baseline"],
+            "answers_match":     g["answers_match"],
+            "n_retrieved":       g["n_retrieved"],
+            "retrieved_ids_hash": hashlib.sha1(g["retrieved_ids"].encode()).hexdigest()[:12],
+        })
+
+    pd.DataFrame(rows).to_excel(writer, sheet_name="overlapping_context", index=False)
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────

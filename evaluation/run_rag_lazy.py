@@ -234,7 +234,8 @@ def run_multi_evaluation_lazy(
                             sec_s    = search_bm25(coll_bm, qt, payload_must=filters, top_k=sec_k, extra_filter=sec_filter) if need_sparse else None
                             section_cache[skey] = {"dense": sec_d, "sparse": sec_s}
 
-            # Per-config generation
+            # ── Phase A: retrieve + fuse for every config first — no generation yet ──
+            pending: list[dict] = []
             for cfg_idx, cfg in cfg_group:
                 enh_flag      = cfg["enhance_query_flag"]
                 pc            = precomp_cache[enh_flag]
@@ -247,7 +248,7 @@ def run_multi_evaluation_lazy(
                     rkey             = (qt, level)
                     rc               = retrieval_cache[rkey]
                     # compute results per level
-                    dense_results    = rc["dense"] 
+                    dense_results    = rc["dense"]
                     sparse_results   = rc["sparse"]
                     use_parent_fetch = rc["use_parent_fetch"]
                     pk_cached        = rc["pk"]
@@ -258,7 +259,6 @@ def run_multi_evaluation_lazy(
                     for retrieval_mode in cfg["retrieval_modes"]:
                         run_id         = f"{meta.get('ticker','?')}_{meta.get('year','?')}_{level}_{retrieval_mode}_{q_idx}"
                         context_points = []
-                        rag_answer     = ""
                         try:
                             if retrieval_mode == "dense":
                                 track_b = dense_results.points if hasattr(dense_results, "points") else []
@@ -294,38 +294,71 @@ def run_multi_evaluation_lazy(
                                     fetch_coll = PARENT_COLL_BM25 if retrieval_mode == "sparse" else PARENT_COLL_DENSE
                                     context_points = client.retrieve(fetch_coll, ids=parent_ids, with_payload=True)
 
-                            if not context_points:
-                                rag_answer = "No relevant context retrieved."
-                            else:
-                                wrapped    = SimpleNamespace(points=context_points)
-                                if gen_model:
-                                    rag_answer, _ = generate_llm_answer(orig_query, wrapped, gen_model, gen_tokenizer)
-                                    print(f"      [gen] {len(rag_answer)} chars: {rag_answer[:160].strip()}...")
-                                else:
-                                    rag_answer = " NO GENERATED ANSWER "
-
                         except Exception as e:
                             print(f"      [ERROR] {e}")
 
-                        rag_ret = "".join(f"======================\nSource Number {p_n}\n {p}" for p_n, p in enumerate(context_points))
-                        all_rows.append({
-                            "finder_id":           finder_id,
-                            "run_id":              run_id,
-                            "level":               level,
-                            "retrieval_mode":      retrieval_mode,
-                            "ticker_filter":       ticker_str,
-                            "enhance_query_flag":  enh_flag,
-                            "section_alpha":       section_alpha,
-                            "config_key":          f"{_short_level(level)}_{_MODE_LABEL[retrieval_mode]}_{'ENH' if enh_flag else 'PLAIN'}_A{section_alpha}",
-                            "query":               orig_query,
-                            "query_enhanced":      pc["enhanced_query"] if enh_flag else None,
-                            "category":            category,
-                            "query_type":          query_type,
-                            "truth_answer":        truth_answer,
-                            "truth_ref":           truth_ref,
-                            "rag_answer":          rag_answer,
-                            "rag_retrieved":       rag_ret,
+                        rag_ret       = "".join(f"======================\nSource Number {p_n}\n {p}" for p_n, p in enumerate(context_points))
+                        retrieval_key = tuple(p.id for p in context_points)
+
+                        pending.append({
+                            "run_id":          run_id,
+                            "level":           level,
+                            "retrieval_mode":  retrieval_mode,
+                            "enh_flag":        enh_flag,
+                            "section_alpha":   section_alpha,
+                            "query_enhanced":  pc["enhanced_query"] if enh_flag else None,
+                            "context_points":  context_points,
+                            "rag_ret":         rag_ret,
+                            "retrieval_key":   retrieval_key,
                         })
+
+            # ── Phase B: overlap check — group configs whose retrieval is identical ──
+            overlap_groups: dict[tuple, list[dict]] = {}
+            for entry in pending:
+                overlap_groups.setdefault(entry["retrieval_key"], []).append(entry)
+            dupe_groups = [g for g in overlap_groups.values() if len(g) > 1]
+            if dupe_groups:
+                n_dupe_configs = sum(len(g) for g in dupe_groups)
+                print(f"      [overlap] {len(dupe_groups)} group(s) of configs share identical "
+                      f"retrieval ({n_dupe_configs} configs total)")
+
+            # ── Phase C: generate once per unique retrieval, apply to every config sharing it ──
+            for retrieval_key, members in overlap_groups.items():
+                context_points = members[0]["context_points"]
+                rag_answer = ""
+                try:
+                    if not context_points:
+                        rag_answer = "No relevant context retrieved."
+                    else:
+                        wrapped = SimpleNamespace(points=context_points)
+                        if gen_model:
+                            rag_answer, _ = generate_llm_answer(orig_query, wrapped, gen_model, gen_tokenizer)
+                            shared_note = f" ({len(members)} configs share this)" if len(members) > 1 else ""
+                            print(f"      [gen] {len(rag_answer)} chars{shared_note}: {rag_answer[:160].strip()}...")
+                        else:
+                            rag_answer = " NO GENERATED ANSWER "
+                except Exception as e:
+                    print(f"      [ERROR] {e}")
+
+                for entry in members:
+                    all_rows.append({
+                        "finder_id":           finder_id,
+                        "run_id":              entry["run_id"],
+                        "level":               entry["level"],
+                        "retrieval_mode":      entry["retrieval_mode"],
+                        "ticker_filter":       ticker_str,
+                        "enhance_query_flag":  entry["enh_flag"],
+                        "section_alpha":       entry["section_alpha"],
+                        "config_key":          f"{_short_level(entry['level'])}_{_MODE_LABEL[entry['retrieval_mode']]}_{'ENH' if entry['enh_flag'] else 'PLAIN'}_A{entry['section_alpha']}",
+                        "query":               orig_query,
+                        "query_enhanced":      entry["query_enhanced"],
+                        "category":            category,
+                        "query_type":          query_type,
+                        "truth_answer":        truth_answer,
+                        "truth_ref":           truth_ref,
+                        "rag_answer":          rag_answer,
+                        "rag_retrieved":       entry["rag_ret"],
+                    })
 
     client.close()
 
@@ -403,7 +436,7 @@ if __name__ == "__main__":
     configs = [
         #write_config(tickers=["pypl"], levels=LEVELS, retrieval_modes=["hybrid","sparse"], enhance_query_flag = [True, False], section_alpha = [0 ,1]),
         #write_config(tickers=["tsla"], levels=LEVELS, retrieval_modes=["hybrid","dense","sparse"], enhance_query_flag = [True, False], section_alpha = [0 ,1]),
-        write_config(tickers=["tsla"], levels=[1], retrieval_modes=["sparse"], enhance_query_flag = [False], section_alpha = [0]),
+        write_config(tickers=["tsla"], levels=[1], retrieval_modes=["sparse"], enhance_query_flag = [False], section_alpha = [0,1]),
     
     ]
     print(f"Running {len(configs)} configs...")
