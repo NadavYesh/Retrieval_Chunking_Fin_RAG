@@ -408,7 +408,7 @@ def _encode_for_batch(tokenizer, prompt_text: str) -> list:
 
 def generate_llm_answers_batch(
     items, model, tokenizer, max_tokens=2048,
-    completion_batch_size=4, prefill_batch_size=2,
+    completion_batch_size=3, prefill_batch_size=1,
 ):
     """
     Batched version of generate_llm_answer: generates answers for a list of

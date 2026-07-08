@@ -915,7 +915,7 @@ def _parse_judge_response(response: str) -> dict:
 
 def judge_llm_batch(
     items: list[tuple], model, tokenizer, max_tokens: int = 1000,
-    completion_batch_size: int = 4, prefill_batch_size: int = 2,
+    completion_batch_size: int = 3, prefill_batch_size: int = 1,
 ) -> list[dict]:
     """
     Batched version of judge_llm: judges a list of (question, truth_answer, rag_answer,

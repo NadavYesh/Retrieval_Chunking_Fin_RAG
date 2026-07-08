@@ -139,6 +139,11 @@ def run_multi_evaluation_lazy(
         pd.DataFrame(all_rows).to_json(tmp_path)
         os.replace(tmp_path, out_path)
 
+    # Resume support: skip already-completed questions (0-indexed) for tickers whose
+    # prior run was interrupted mid-way -- e.g. {"tsla": 5} resumes tsla at question 5
+    # (i.e. questions[5:]) while every other ticker still runs from question 0.
+    RESUME_FROM = {"tsla": 5}
+
     ticker_groups: dict[tuple, list[tuple[int, dict]]] = defaultdict(list)
     for i, cfg in enumerate(configs):
         key = tuple(sorted(cfg["tickers"]))
@@ -173,8 +178,13 @@ def run_multi_evaluation_lazy(
             )
 
         ticker_str = tickers[0] if len(tickers) == 1 else "multi" # all thesis cases are single.
+        skip_before = RESUME_FROM.get(ticker_str, 0)
+        if skip_before:
+            print(f"  [resume] skipping questions[:{skip_before}] for {ticker_str}")
 
         for q_idx, (_, row) in enumerate(finder_df.iterrows()):
+            if q_idx < skip_before:
+                continue
             finder_id    = row.get("_id", "")
             orig_query   = row.get("query", "")
             truth_answer = row.get("truth_answer", "")
