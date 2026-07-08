@@ -913,12 +913,21 @@ def _parse_judge_response(response: str) -> dict:
     }
 
 
-def judge_llm_batch(items: list[tuple], model, tokenizer, max_tokens: int = 1000) -> list[dict]:
+def judge_llm_batch(
+    items: list[tuple], model, tokenizer, max_tokens: int = 1000,
+    completion_batch_size: int = 4, prefill_batch_size: int = 2,
+) -> list[dict]:
     """
     Batched version of judge_llm: judges a list of (question, truth_answer, rag_answer,
     baseline_answer) tuples in ONE batched forward pass instead of one generate() call
     per item — lets a single GPU (e.g. Apple Silicon/Metal) process multiple judge
     prompts at once instead of serializing them.
+
+    completion_batch_size/prefill_batch_size are forwarded to mlx_lm's
+    BatchGenerator, which otherwise defaults to 32/8 concurrent sequences —
+    that many prompts' KV caches held at once is what was OOM-ing. Lowering
+    these caps concurrency (and memory) without changing how many items are
+    logically judged in one call.
 
     Returns a list of score-dicts (same shape as judge_llm's return: relevance,
     completeness, judge_response), one per item, in the same order as `items`.
@@ -945,7 +954,10 @@ def judge_llm_batch(items: list[tuple], model, tokenizer, max_tokens: int = 1000
         add_special = tokenizer.bos_token is None or not p.startswith(tokenizer.bos_token)
         token_prompts.append(tokenizer.encode(p, add_special_tokens=add_special))
 
-    batch = batch_generate(model, tokenizer, token_prompts, max_tokens=max_tokens, verbose=True)
+    batch = batch_generate(
+        model, tokenizer, token_prompts, max_tokens=max_tokens, verbose=True,
+        completion_batch_size=completion_batch_size, prefill_batch_size=prefill_batch_size,
+    )
     return [_parse_judge_response(response) for response in batch.texts]
 
 

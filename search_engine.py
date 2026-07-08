@@ -406,7 +406,10 @@ def _encode_for_batch(tokenizer, prompt_text: str) -> list:
     return tokenizer.encode(prompt_text, add_special_tokens=add_special)
 
 
-def generate_llm_answers_batch(items, model, tokenizer, max_tokens=2048):
+def generate_llm_answers_batch(
+    items, model, tokenizer, max_tokens=2048,
+    completion_batch_size=4, prefill_batch_size=2,
+):
     """
     Batched version of generate_llm_answer: generates answers for a list of
     (user_query, search_results) pairs in ONE batched forward pass, instead of one
@@ -417,6 +420,12 @@ def generate_llm_answers_batch(items, model, tokenizer, max_tokens=2048):
     as generate_llm_answer, without being sent to the model at all -- only items
     that actually need generation are included in the batch call. Returns a list of
     (answer_text, context_chunks) tuples, one per item, in the same order as `items`.
+
+    completion_batch_size/prefill_batch_size are forwarded to mlx_lm's
+    BatchGenerator, which otherwise defaults to 32/8 -- that many prompts'
+    KV caches held concurrently is what was OOM-ing. Lowering these caps how
+    many sequences run at once (trading throughput for a lower memory
+    ceiling) rather than how many prompts are logically in the batch.
     """
     from mlx_lm import batch_generate
 
@@ -436,7 +445,10 @@ def generate_llm_answers_batch(items, model, tokenizer, max_tokens=2048):
 
     if batch_prompts:
         token_prompts = [_encode_for_batch(tokenizer, p) for p in batch_prompts]
-        batch = batch_generate(model, tokenizer, token_prompts, max_tokens=max_tokens, verbose=False)
+        batch = batch_generate(
+            model, tokenizer, token_prompts, max_tokens=max_tokens, verbose=False,
+            completion_batch_size=completion_batch_size, prefill_batch_size=prefill_batch_size,
+        )
         for pos, text, chunks in zip(batch_positions, batch.texts, batch_chunks):
             results[pos] = (text.strip(), chunks)
 
