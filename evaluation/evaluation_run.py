@@ -888,8 +888,13 @@ def judge_llm(question: str, truth_answer: str, rag_answer: str, baseline_answer
     )
     messages  = [{"role": "user", "content": prompt_text}]
     formatted = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    response  = generate(model, tokenizer, prompt=formatted, verbose=False)
+    response  = generate(model, tokenizer, prompt=formatted, verbose=False, max_tokens=1000)
 
+    return _parse_judge_response(response)
+
+
+def _parse_judge_response(response: str) -> dict:
+    """Shared JSON-extraction logic for one judge_llm-style raw model response."""
     try:
         m = re.search(r'\{[^}]+\}', response, re.DOTALL)
         if m:
@@ -908,9 +913,47 @@ def judge_llm(question: str, truth_answer: str, rag_answer: str, baseline_answer
     }
 
 
+def judge_llm_batch(items: list[tuple], model, tokenizer, max_tokens: int = 1000) -> list[dict]:
+    """
+    Batched version of judge_llm: judges a list of (question, truth_answer, rag_answer,
+    baseline_answer) tuples in ONE batched forward pass instead of one generate() call
+    per item — lets a single GPU (e.g. Apple Silicon/Metal) process multiple judge
+    prompts at once instead of serializing them.
+
+    Returns a list of score-dicts (same shape as judge_llm's return: relevance,
+    completeness, judge_response), one per item, in the same order as `items`.
+    """
+    sys.path.append(str(Path(__file__).resolve().parent.parent))
+    from prompts import JUDGE_PROMPT
+    from mlx_lm import batch_generate
+
+    prompts_text = []
+    for question, truth_answer, rag_answer, baseline_answer in items:
+        prompt_text = JUDGE_PROMPT.format(
+            question=question,
+            answer_ref=truth_answer,
+            answer_a=rag_answer,
+            answer_b=baseline_answer,
+        )
+        messages = [{"role": "user", "content": prompt_text}]
+        prompts_text.append(
+            tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        )
+
+    token_prompts = []
+    for p in prompts_text:
+        add_special = tokenizer.bos_token is None or not p.startswith(tokenizer.bos_token)
+        token_prompts.append(tokenizer.encode(p, add_special_tokens=add_special))
+
+    batch = batch_generate(model, tokenizer, token_prompts, max_tokens=max_tokens, verbose=True)
+    return [_parse_judge_response(response) for response in batch.texts]
+
+
 def _judge_unjudged_rows(rows_df: pd.DataFrame, judge_model, judge_tok) -> pd.DataFrame:
     """
-    Run judge_llm over every row that hasn't been judged yet, mutating rows_df in place.
+    Judge every row that hasn't been judged yet, mutating rows_df in place. Rows
+    needing a real verdict are batched into one judge_llm_batch call instead of one
+    generate() call per row.
 
     "Unjudged" = relevance is null. This makes judging resumable/idempotent: calling
     this twice on the same DataFrame (e.g. apply_llm_judge run again after an interrupted
@@ -935,29 +978,35 @@ def _judge_unjudged_rows(rows_df: pd.DataFrame, judge_model, judge_tok) -> pd.Da
 
     todo = rows_df.index[rows_df["relevance"].isna()]
     print(f"  Judging {len(todo)}/{len(rows_df)} unjudged row(s) with Phi-4…")
-    for i, idx in enumerate(todo):
+
+    batch_idxs:  list = []
+    batch_items: list[tuple] = []
+    for idx in todo:
         row      = rows_df.loc[idx]
         baseline = row.get("baseline_answer", "")
         if row.get("config_key") == BASELINE_CONFIG_KEY:
             # This row IS the baseline — skip self-comparison
-            scores = {"relevance": "is_baseline", "completeness": "is_baseline", "judge_response": ""}
+            rows_df.at[idx, "relevance"]      = "is_baseline"
+            rows_df.at[idx, "completeness"]   = "is_baseline"
+            rows_df.at[idx, "judge_response"] = ""
         elif not baseline:
             # Baseline config absent from this sweep — skip rather than judge against ""
-            scores = {"relevance": "no_baseline", "completeness": "no_baseline", "judge_response": ""}
+            rows_df.at[idx, "relevance"]      = "no_baseline"
+            rows_df.at[idx, "completeness"]   = "no_baseline"
+            rows_df.at[idx, "judge_response"] = ""
         else:
-            scores = judge_llm(
-                question=row["query"],
-                truth_answer=row.get("truth_answer", ""),
-                rag_answer=row.get("rag_answer", ""),
-                baseline_answer=baseline,
-                model=judge_model, tokenizer=judge_tok,
-            )
-        for k, v in scores.items():
-            rows_df.at[idx, k] = v
-        sys.stdout.write(f"\r  [{i+1:>3}/{len(todo)}] judged")
-        sys.stdout.flush()
-    if len(todo):
-        print()
+            batch_idxs.append(idx)
+            batch_items.append((
+                row["query"], row.get("truth_answer", ""), row.get("rag_answer", ""), baseline,
+            ))
+
+    if batch_items:
+        print(f"  Batching {len(batch_items)} row(s) needing a real verdict into one call…")
+        results = judge_llm_batch(batch_items, judge_model, judge_tok)
+        for idx, scores in zip(batch_idxs, results):
+            for k, v in scores.items():
+                rows_df.at[idx, k] = v
+
     return rows_df
 
 

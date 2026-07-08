@@ -20,7 +20,7 @@ import pandas as pd
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 from search_engine import (
-    search_with_payload, search_bm25, rrf_fuse, rrf_fuse_multi, generate_llm_answer,
+    search_with_payload, search_bm25, rrf_fuse, rrf_fuse_multi, generate_llm_answers_batch,
     search_dense_for_year, search_bm25_for_year,
 )
 from FinDER import run_finder
@@ -339,23 +339,40 @@ def run_multi_evaluation_lazy(
                 print(f"      [overlap] {len(dupe_groups)} group(s) of configs share identical "
                       f"retrieval ({n_dupe_configs} configs total)")
 
-            # ── Phase C: generate once per unique retrieval, apply to every config sharing it ──
-            for retrieval_key, members in overlap_groups.items():
-                context_points = members[0]["context_points"]
-                rag_answer = ""
+            # ── Phase C: generate once per unique retrieval, batched across every group ──
+            # for this question, then apply each result to every config sharing it.
+            group_keys = list(overlap_groups.keys())
+            rag_answers: dict[tuple, str] = {}
+            batch_keys:  list[tuple] = []
+            batch_items: list[tuple] = []
+
+            for retrieval_key in group_keys:
+                context_points = overlap_groups[retrieval_key][0]["context_points"]
+                if not context_points:
+                    rag_answers[retrieval_key] = "No relevant context retrieved."
+                elif not gen_model:
+                    rag_answers[retrieval_key] = " NO GENERATED ANSWER "
+                else:
+                    batch_keys.append(retrieval_key)
+                    batch_items.append((orig_query, SimpleNamespace(points=context_points)))
+
+            if batch_items:
+                print(f"      [gen] batching {len(batch_items)} unique retrieval(s) for this question "
+                      f"in one call ({len(group_keys)} configs total)")
                 try:
-                    if not context_points:
-                        rag_answer = "No relevant context retrieved."
-                    else:
-                        wrapped = SimpleNamespace(points=context_points)
-                        if gen_model:
-                            rag_answer, _ = generate_llm_answer(orig_query, wrapped, gen_model, gen_tokenizer)
-                            shared_note = f" ({len(members)} configs share this)" if len(members) > 1 else ""
-                            print(f"      [gen] {len(rag_answer)} chars{shared_note}: {rag_answer[:160].strip()}...")
-                        else:
-                            rag_answer = " NO GENERATED ANSWER "
+                    batch_results = generate_llm_answers_batch(batch_items, gen_model, gen_tokenizer)
+                    for retrieval_key, (answer, _) in zip(batch_keys, batch_results):
+                        n_shared = len(overlap_groups[retrieval_key])
+                        shared_note = f" ({n_shared} configs share this)" if n_shared > 1 else ""
+                        print(f"      [gen] {len(answer)} chars{shared_note}: {answer[:160].strip()}...")
+                        rag_answers[retrieval_key] = answer
                 except Exception as e:
                     print(f"      [ERROR] {e}")
+                    for retrieval_key in batch_keys:
+                        rag_answers[retrieval_key] = ""
+
+            for retrieval_key, members in overlap_groups.items():
+                rag_answer = rag_answers[retrieval_key]
 
                 for entry in members:
                     all_rows.append({
@@ -397,7 +414,7 @@ def write_config(
     levels:          list[str] = None,
     retrieval_modes: list[str] = None,
     enhance_query_flag = [True, False],
-    section_alpha = [0, 0.5 ,1], 
+    section_alpha = [0 ,1], 
 ) -> list[dict]:
     """
     Generate all permutations of evaluation configs for the given tickers.

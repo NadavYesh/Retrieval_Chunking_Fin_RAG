@@ -338,12 +338,15 @@ def search_agent(user_query, model, tokenizer, embed_model, coll_name, ENAHNCE_Q
         print(f"Error in search_agent: {e}")
         return None, None
 
-def generate_llm_answer(user_query, search_results, model, tokenizer):
+def _build_rag_prompt(user_query, search_results, tokenizer):
     """
-    Given a user query and search results, this function returns an LLM generated answer.
+    Build the chat-templated prompt text and context_chunks for one RAG query, or
+    (None, []) if there's nothing retrieved to answer from. Shared by
+    generate_llm_answer and generate_llm_answers_batch so both build the exact same
+    prompt for the same inputs -- batching must not change what gets asked.
     """
     if not search_results or not search_results.points:
-        return "No relevant information found in the database to answer your query.", []
+        return None, []
 
     # Extract and format context from search results
     context_chunks = []
@@ -351,7 +354,7 @@ def generate_llm_answer(user_query, search_results, model, tokenizer):
         text = point.payload.get("text", "No text content available.")
         ticker = point.payload.get("ticker", "n/a")
         year = point.payload.get("fiscal_year_end", "n/a")
-        
+
         # Robust year extraction for display
         display_year = "n/a"
         try:
@@ -363,12 +366,10 @@ def generate_llm_answer(user_query, search_results, model, tokenizer):
                 display_year = str(year)
         except:
             pass
-            
+
         context_chunks.append(f"--- Source {i+1} (Ticker: {ticker.upper()}, Year: {display_year}) ---\n{text}")
 
     context_text = "\n\n".join(context_chunks)
-
-    
 
     messages = [
         {"role": "system", "content": RAG_ANSWER_PROMPT},
@@ -381,7 +382,62 @@ def generate_llm_answer(user_query, search_results, model, tokenizer):
     prompt = tokenizer.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True, enable_thinking=False
     )
+    return prompt, context_chunks
+
+
+def generate_llm_answer(user_query, search_results, model, tokenizer):
+    """
+    Given a user query and search results, this function returns an LLM generated answer.
+    """
+    prompt, context_chunks = _build_rag_prompt(user_query, search_results, tokenizer)
+    if prompt is None:
+        return "No relevant information found in the database to answer your query.", []
 
     generated_text = generate(model, tokenizer, prompt=prompt, verbose=False, max_tokens=2048)
 
     return generated_text.strip(), context_chunks
+
+
+def _encode_for_batch(tokenizer, prompt_text: str) -> list:
+    """Tokenize a chat-templated prompt string the same way mlx_lm.generate does
+    internally (stream_generate), so batched and single-item generation see
+    identical token inputs for the identical prompt text."""
+    add_special = tokenizer.bos_token is None or not prompt_text.startswith(tokenizer.bos_token)
+    return tokenizer.encode(prompt_text, add_special_tokens=add_special)
+
+
+def generate_llm_answers_batch(items, model, tokenizer, max_tokens=2048):
+    """
+    Batched version of generate_llm_answer: generates answers for a list of
+    (user_query, search_results) pairs in ONE batched forward pass, instead of one
+    generate() call per item -- lets a single GPU (e.g. Apple Silicon/Metal) actually
+    process multiple prompts at once instead of serializing separate calls.
+
+    Items with no retrieved points get the same "no relevant information" sentinel
+    as generate_llm_answer, without being sent to the model at all -- only items
+    that actually need generation are included in the batch call. Returns a list of
+    (answer_text, context_chunks) tuples, one per item, in the same order as `items`.
+    """
+    from mlx_lm import batch_generate
+
+    results = [None] * len(items)
+    batch_prompts  = []
+    batch_chunks   = []
+    batch_positions = []
+
+    for i, (user_query, search_results) in enumerate(items):
+        prompt, context_chunks = _build_rag_prompt(user_query, search_results, tokenizer)
+        if prompt is None:
+            results[i] = ("No relevant information found in the database to answer your query.", [])
+        else:
+            batch_prompts.append(prompt)
+            batch_chunks.append(context_chunks)
+            batch_positions.append(i)
+
+    if batch_prompts:
+        token_prompts = [_encode_for_batch(tokenizer, p) for p in batch_prompts]
+        batch = batch_generate(model, tokenizer, token_prompts, max_tokens=max_tokens, verbose=False)
+        for pos, text, chunks in zip(batch_positions, batch.texts, batch_chunks):
+            results[pos] = (text.strip(), chunks)
+
+    return results
