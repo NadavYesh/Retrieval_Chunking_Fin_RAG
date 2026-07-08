@@ -5,9 +5,9 @@ COLL_NAME_DENSE = ["--PILOT --level 1 DENSE",
                    "--PILOT --level 2 DENSE","--PILOT --level 3 DENSE"]
 COLL_NAME_SPARSE = ["--PILOT --level 1 BM25",
                      "--PILOT --level 2 BM25","--PILOT --level 3 BM25"]
-paths = ["/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/chunks/hierarchical/indexed-at-07-07-26/header/upsert_batch_2",
-         "/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/chunks/hierarchical/indexed-at-07-07-26/child/upsert_batch_2",
-         "/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/chunks/hierarchical/indexed-at-07-07-26/enriched/upsert_batch_2"
+paths = ["/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/chunks/hierarchical/indexed-at-07-07-26/header/upsert_batch_3",
+         "/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/chunks/hierarchical/indexed-at-07-07-26/child/upsert_batch_3",
+         "/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/chunks/hierarchical/indexed-at-07-07-26/enriched/upsert_batch_3"
          ]
 ############### make false for not level 3
 
