@@ -21,7 +21,7 @@ from mlx_embeddings.utils import load as emb_load
 
 from evaluation.build_evaluation_dataset import build_dataset
 
-TICKERS     = ["tsla", "pypl"]
+TICKERS     = ["tsla", "pypl", "aapl", "jpm", "nvda"]
 OUTPUT_PATH = "/Users/nadavsmacbookair/Desktop/Thesis/data/eval_dataset/limited-new-precomputed-qwen.parquet"
 
 print("Loading generation model (Qwen3.5-9B-OptiQ-4bit)...")

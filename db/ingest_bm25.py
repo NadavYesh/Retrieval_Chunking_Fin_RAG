@@ -64,10 +64,10 @@ def init_collection():
 
 def upsert_bm25_data():
     print(f"WARNING: ingesting into '{COLL_NAME_SPARSE}'. Make sure you are not duplicating.")
-    confirm = input("Type 'y' to proceed: ")
-    if confirm.lower() != "y":
-        print("Ingestion aborted.")
-        return
+    # confirm = input("Type 'y' to proceed: ")
+    # if confirm.lower() != "y":
+    #     print("Ingestion aborted.")
+    #     return
 
     total_points = 0
     for path in CHUNK_PATHS:

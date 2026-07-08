@@ -22,8 +22,8 @@ sys.path.append(str(Path(__file__).resolve().parent))
 import mlx.core as mx
 from mlx_lm import load
 
-from evaluation.build_evaluation_dataset import DATASET_PATH, load_dataset
-from evaluation.run_rag_lazy import run_multi_evaluation_lazy, write_config, COLLECTIONS
+from evaluation.build_evaluation_dataset import load_dataset
+from evaluation.run_rag_lazy import DATASET_PATH, run_multi_evaluation_lazy, write_config, COLLECTIONS
 from evaluation.evaluation_run import run_multi_analysis, load_corpus
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
@@ -78,17 +78,12 @@ mx.clear_cache()
 # corpus, fp_index, corpus_text_map = load_corpus()
 # print(f"  {len(corpus)} chunks loaded")
 
-# # ── 6. Optional judge model ───────────────────────────────────────────────────
-# judge_model, judge_tok = None, None
-# if USE_LLM_JUDGE:
-#     from mlx_lm import load as mlx_load
-#     print("\nLoading Phi-4 judge model...")
-#     judge_model, judge_tok = mlx_load("mlx-community/phi-4-4bit")
-
-# # ── 7. Analysis (one Excel per ticker) ───────────────────────────────────────
+# # ── 6. Analysis (one Excel per ticker; retrieval-only, no LLM judge) ─────────
+# # The LLM judge is a deliberately separate stage -- run apply_llm_judge in
+# # evaluation_run.py afterwards, pointed at the analysis_*.pkl saved below.
 # for path in eval_paths:
 #     print(f"\n{'='*60}\nAnalysing: {Path(path).name}\n{'='*60}")
-#     run_multi_analysis(Path(path), corpus, fp_index, corpus_text_map, judge_model, judge_tok)
+#     run_multi_analysis(Path(path), corpus, fp_index, corpus_text_map)
 
 # # ── 8. Merge new outputs into combined JSON ───────────────────────────────────
 # print(f"\nMerging into {MERGED_PATH.name} …")

@@ -95,7 +95,8 @@ def score_row(
             best_word = wr
         if nr > best_num:
             best_num = nr
-
+    
+    # hit is defined as either of the threshold.
     hit = best_word >= WORD_THRESH or best_num >= NUM_THRESH
     return {"word_recall": round(best_word, 4),
             "num_recall":  round(best_num,  4),

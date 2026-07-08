@@ -26,7 +26,7 @@ sys.path.append(str(Path(__file__).resolve().parent.parent))
 from FinDER import run_finder
 from evaluation.rag_functions import enhance_query, extract_metadata, embed_query
 
-DATASET_PATH = "/Users/nadavsmacbookair/Desktop/Thesis/data/eval_dataset/limited-new-precomputed.parquet"
+DATASET_PATH = "/Users/nadavsmacbookair/Desktop/Thesis/data/eval_dataset/precomputed.parquet"
 
 
 def _git_snapshot() -> dict:

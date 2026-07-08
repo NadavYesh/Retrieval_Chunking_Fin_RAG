@@ -113,11 +113,11 @@ def get_embedding(texts, model, tokenizer):
 
 def upsert_data(chunk_paths, coll_name_dense, level_3_enriched=False):
     print(f"WARNING: are you absolutuley sure you want to ingest data? Make sure you are not replicating.\nthis is collection {coll_name_dense}")
-    confirm = input("Type 'y' to proceed with ingestion: ")
-    if confirm.lower() != 'y':
-        print("Ingestion aborted.")
-        return
-    
+    # confirm = input("Type 'y' to proceed with ingestion: ")
+    # if confirm.lower() != 'y':
+    #     print("Ingestion aborted.")
+    #     return
+
 
     embed_model, embed_tokenizer = emb_load("mlx-community/embeddinggemma-300m-bf16")
 

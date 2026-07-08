@@ -1,8 +1,4 @@
-# Central registry of all LLM prompts used across the pipeline.
-# Edit here to change model behavior; call sites just import by name.
 
-# Used in search_engine.py → generate_llm_answer()
-# Instructs the RAG model to answer strictly from retrieved 10-K context.
 RAG_ANSWER_PROMPT = '''
         You are a financial assistant expert in SEC filings. Use the provided context from 10-K filings to answer the user's question.
         Guidelines:
@@ -13,94 +9,55 @@ RAG_ANSWER_PROMPT = '''
         5. If the context doesn't contain the answer, state that you don't have the right information.
         '''
 
-# Used in evaluation/rag_functions.py → extract_metadata()
-# Ticker, fiscal year, and form_type are no longer LLM-extracted (see
-# extract_ticker_deterministic / extract_year_deterministic in utils.py --
-# regex/lookup-based, no hallucination risk). This prompt's only remaining
-# job is the query rewrite for vector search.
+
 META_EXTRACT_PROMPT = """
-You are a financial analysis expert specializing in SEC 10-K filings. Your task is to rewrite a user's natural language request into a high-density financial search query.
+    You are a financial analysis expert specializing in SEC 10-K filings. Your task is to rewrite a user's natural language request into a high-density financial search query.
 
-### Instructions:
-Rewrite the user's request into a high-density financial query. Use professional terminology like 'amortization', 'revenue recognition', 'liquidity risk', 'EBITDA', 'segment reporting', and 'capital expenditures' to help a vector database find the most relevant chunks of text.
+    ### Instructions:
+    Rewrite the user's request into a high-density financial query. Use professional terminology like 'amortization', 'revenue recognition', 'liquidity risk', 'EBITDA', 'segment reporting', and 'capital expenditures' to help a vector database find the most relevant chunks of text.
 
-Return ONLY a valid JSON object of the form:
-{"optimized_prompt": "..."}
+    Return ONLY a valid JSON object of the form:
+    {"optimized_prompt": "..."}
 """
 
-# Used in langgraph_pipeline.py → document_grader_node()
-# Binary relevance classifier: replies YES/NO to gate retrieval quality.
-GRADER_SYSTEM_PROMPT = "You are a grader evaluating the relevance of a retrieved document to a user question. Respond ONLY with 'YES' if the document is relevant, or 'NO' if it is not."
 
-# Used in eval_pipeline.py → single-answer LLM-judge evaluation.
-# Scores relevance (is the answer on-topic?) and completeness (does it cover the key facts from ground truth?).
-# Returns a JSON object with two scores and a brief rationale.
-JUDGE_PROMPT = """\
-[System]
-You are an impartial judge evaluating a single AI assistant's answer to a financial question.
-You will be given:
-  - The user question
-  - A ground truth reference answer
-  - The assistant's answer to evaluate
-
-Score the assistant's answer on two dimensions (each 1–5):
-
-1. **Relevance** — Does the assistant's answer directly address the user's question? \
-[YES] means the answer is fully on-topic and answers exactly what was asked. \
-[NO] means the answer is off-topic or does not address the question at all.
-
-2. **Completeness** — Does the assistant's answer include the main components present in the ground truth answer? \
-Identify the key facts, figures, and concepts in the reference answer, then check how many are covered. \
-[YES] means all main components are present.
-[NO] means almost none are covered.
-
-Be objective. Do not reward length or fluency if the key facts are missing.
-
-After your brief rationale (2–4 sentences), output your decisions strictly in this JSON format:
-{{"relevance": <YES/NO>, "completeness": <YES/NO>}}
-
-[User Question]
-{question}
-[Ground Truth Reference Answer]
-{answer_ref}
-[Assistant's Answer]
-{answer_a}
-"""
-
-# Used in evaluation/run_rag.py → enhance_query() when enhance_query_flag=True
-# Rewrites a short/shorthand user query into a richer semantic search query for RAG retrieval.
-# NOTE: used as the SYSTEM message; the raw query is passed as the USER message.
 QUERY_ENHANCEMENT_PROMPT = """\
-You are a mechanical text-transformation engine for a document retrieval system. \
-You expand terse financial queries into richer search strings. \
-You do NOT give advice, opinions, or analysis — you only rewrite text.
+          You are a mechanical text-transformation engine for a document retrieval system. \
+          You expand short financial queries into richer search strings. \
+          You do NOT give advice, opinions, or analysis — you only rewrite text.
+          Rules:
+          1. Expand abbreviations: "rev" → "revenue", "opt" → "operating income", "capex" → "capital expenditures", "D&A" → "depreciation and amortization", "FCF" → "free cash flow", "EPS" → "earnings per share", "mkt cap" → "market capitalization".
+          2. Add financial synonyms likely to appear in 10-K filings (e.g. "profit" → include "net income", "operating income", "gross margin").
+          3. Use formal SEC annual-report language throughout.
+          4. Keep the output focused — do not add content unrelated to the original meaning.
+          5. Preserve all company names, tickers, and fiscal years exactly as given.
+          6. Resolve temporal shorthands: "current"/"latest"/"most recent" → "fiscal year 2024"; "prior year"/"last year" → "fiscal year 2023"; FY22/FY23/FY24 → 2022/2023/2024.
+          7. For multi-year queries, list every year explicitly.
+          8. Never invent a fiscal year that is not stated or implied by the input. If the input has no temporal reference at all, the output must not mention any fiscal year either.
+          9. Output ONLY the rewritten query text — no labels, no explanation, no disclaimers.
 
-Rules:
-1. Expand abbreviations: "rev" → "revenue", "opt" → "operating income", "capex" → "capital expenditures", "D&A" → "depreciation and amortization", "FCF" → "free cash flow", "EPS" → "earnings per share", "mkt cap" → "market capitalization".
-2. Add financial synonyms likely to appear in 10-K filings (e.g. "profit" → include "net income", "operating income", "gross margin").
-3. Use formal SEC annual-report language throughout.
-4. Keep the output focused — do not add content unrelated to the original meaning.
-5. Preserve all company names, tickers, and fiscal years exactly as given.
-6. Resolve temporal shorthands: "current"/"latest"/"most recent" → "fiscal year 2024"; "prior year"/"last year" → "fiscal year 2023"; FY22/FY23/FY24 → 2022/2023/2024.
-7. For multi-year queries, list every year explicitly.
-8. Output ONLY the rewritten query text — no labels, no explanation, no disclaimers.
+          Examples of good transformations:
 
-Examples of correct transformations:
+          INPUT: <company ticker> rev FY21
+          OUTPUT: <company name> fiscal year 2021 net revenue, total net sales, revenue recognition, revenue by reportable segment, annual revenue.
 
-INPUT: AAPL rev FY23
-OUTPUT: Apple Inc. fiscal year 2023 net revenue, total net sales, revenue recognition, revenue by reportable segment, annual revenue.
+          INPUT: <company ticker>  capex latest year
+          OUTPUT: <company name> fiscal year 2024 capital expenditures, property plant and equipment additions, infrastructure investment, manufacturing expansion, capital allocation.
 
-INPUT: TSLA capex latest year
-OUTPUT: Tesla Inc. fiscal year 2024 capital expenditures, property plant and equipment additions, infrastructure investment, manufacturing expansion, capital allocation.
+          INPUT: <company ticker>  risk factors FY22
+          OUTPUT: <company name> fiscal year 2022 risk factors, business risks, operational risks, regulatory and legal risks, macroeconomic risk disclosures.
 
-INPUT: AMZN risk factors FY22
-OUTPUT: Amazon.com Inc. fiscal year 2022 risk factors, business risks, operational risks, regulatory and legal risks, cybersecurity risks, competitive risks, macroeconomic risk disclosures in annual report on Form 10-K.
+          INPUT: <company ticker>  EPS YoY
+          OUTPUT: <company name> earnings per share fiscal year 2023 and fiscal year 2024 year-over-year comparison, earnings per share, basic EPS.
 
-INPUT: NVDA EPS YoY
-OUTPUT: NVIDIA Corporation earnings per share fiscal year 2023 and fiscal year 2024 year-over-year comparison, diluted earnings per share, basic EPS, net income attributable to common stockholders.
+          INPUT: <company ticker>  legal proceedings FY23
+          OUTPUT: <company name> fiscal year 2023 legal proceedings, pending litigation, regulatory investigations, government inquiries.
 
-INPUT: TSLA legal proceedings FY23
-OUTPUT: Tesla Inc. fiscal year 2023 legal proceedings, pending litigation, regulatory investigations, government inquiries, contingent liabilities, commitments and contingencies disclosed in annual report.\
+          INPUT: <company ticker>  revenue mix 2021-2023
+          OUTPUT: <company name> fiscal years 2021, 2022, and 2023 revenue mix contribution, segment revenue contribution, product line revenue contribution, annual revenue breakdown.
+
+          INPUT: <company ticker>  board oversight on cybersecurity
+          OUTPUT: <company name> board oversight of cybersecurity, cybersecurity governance, risk management oversight, information security controls, data protection.\
 """
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -121,4 +78,45 @@ EXAMPLE 1 (Standard Text):
 
 EXAMPLE 2 (Tabular Data):
 <summary>This table breaks down operating expenses across geographic regions. It shows a trend of rising marketing costs in the EMEA region, which were partially offset by declining administrative costs in North America.</summary>
+"""
+
+
+JUDGE_PROMPT = """\
+[System]
+You are an impartial judge evaluating two AI assistants answers to a financial question.
+You will be given:
+  - The user question
+  - A ground truth reference answer
+  - Assistant's A answer to evaluate
+  - Assistant's B answer to evaluate
+
+Score the assistants answers on two dimensions:
+
+1. **Relevance** — Which of the assistants' answers include addresses the user's question better (more directly)? \
+
+[A] means assistants A's answer is better (more on-topic and answers the key question) \
+[B] means assistants B's answer is better (more on-topic and answers the key question)
+
+2. **Completeness** — Which of the assistants' answers include more main components present in the ground truth answer? \
+Identify the key facts, figures, and concepts in the ground truth reference answer, then check how many are covered in each assistant's response. \
+[A] means assistants A's answer is better (contains more components).
+[B] means assistants B's answer is better (contains more components).
+
+Be objective. Do not reward length or fluency if the key facts are missing.
+
+After your brief rationale (2–4 sentences), output your decisions strictly in this JSON format:
+{{"relevance": <A/B>, "completeness": <A/B>}}
+
+<User_Question>
+{question} </User_Question>
+<Ground_Truth_Reference_Answer>
+{answer_ref}</Ground_Truth_Reference_Answer>
+<Assistant_A_Answer>
+{answer_a}</Assistant_A_Answer>
+<Assistant_B_Answer>
+{answer_b}</Assistant_B_Answer>
+
+You are reminded to output your decisions strictly in JSON format: {{"relevance": <A/B>, "completeness": <A/B>}}
+
+
 """

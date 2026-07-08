@@ -264,8 +264,8 @@ def sec_chunking_pipeline_hierarchical(
 # ─────────────────────────────────────────────────────────────────────────────
 #%%
 if __name__ == "__main__":
-    RAW_DIR  = '/Users/nadavsmacbookair/Desktop/Thesis/data/html/indexed at 03-07-26/done'
-    RAW_FILES = [f for f in os.listdir(RAW_DIR) if f.endswith(".html") and 'AAPL' in f]
+    RAW_DIR  = '/Users/nadavsmacbookair/Desktop/Thesis/data/html/indexed at 07-07-26/batch_5'
+    RAW_FILES = [f for f in os.listdir(RAW_DIR) if f.endswith(".html")]
 
     BUDGET = 200
     enc = tiktoken.encoding_for_model("text-embedding-3-small")
@@ -277,18 +277,13 @@ if __name__ == "__main__":
         length_function=LENGTH_FUNC,
     )
 
-    BASE_CHUNKS = "/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/chunks/hierarchical/indexed-at-04-07-26-reshaped"
+    BASE_CHUNKS = "/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/chunks/hierarchical/indexed-at-07-07-26"
     ##########################################################
-    BASE_MD     = "/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/md/indexed-at-26-06-26/new_batch"
+    BASE_MD     = "/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/md/indexed-at-07-07-26/"
 
     # Load phi-4 once for the whole batch (expensive — skip if not running level 3)
     RUN_ENRICHED = True
     RUN_FROM_MD = False # if we already have md.x
-    # if RUN_FROM_MD: RAW_DIR = BASE_MD
-    # TICKERS = ["WMT","NVDA"]
-    # RAW_FILES = [f for f in os.listdir(RAW_DIR) if f.endswith(".md")]
-    # if TICKERS:
-    #     RAW_FILES = [x for x in RAW_FILES if any(y in x for y in TICKERS)]
 
     path_names = [os.path.join(RAW_DIR, f) for f in RAW_FILES] 
     caption_ = None
@@ -298,13 +293,13 @@ if __name__ == "__main__":
     #     caption_ = load("mlx-community/Llama-3.2-3B-Instruct-4bit")
 
     for (path, name) in zip(path_names, RAW_FILES):
-        name        = name[:-5] # make 5 for html
+        name        = name[:-5] # deletes the html suffix
         MD_PATH     = f"{BASE_MD}/{name}.md"
         HTML_PATH     = f"{RAW_DIR}/{name}.html"
         doc_path    = f"{BASE_CHUNKS}/doc/{name}.pkl"
         header_path = f"{BASE_CHUNKS}/header/{name}.pkl"
         child_path  = f"{BASE_CHUNKS}/child/{name}.pkl"
-        #enriched_path = f"{BASE_CHUNKS}/enriched/{name}.pkl" if RUN_ENRICHED else None
+        enriched_path = f"{BASE_CHUNKS}/enriched/{name}.pkl" if RUN_ENRICHED else None
         sec_chunking_pipeline_hierarchical(
             html_path=HTML_PATH,
             doc_path=doc_path,
@@ -314,8 +309,8 @@ if __name__ == "__main__":
             budget=BUDGET,
             length_function=LENGTH_FUNC,
             char_splitter=CHAR_SPLITTER,
-            #enriched_path=enriched_path,
-            # caption_=caption_,
+            enriched_path=enriched_path,
+            caption_=caption_,
         )
         
 

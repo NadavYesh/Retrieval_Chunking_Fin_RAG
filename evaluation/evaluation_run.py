@@ -2,23 +2,25 @@
 """
 RAG evaluation analysis: retrieval statistics, truth-chunk corpus lookup, generation judging.
 
-Retrieval metrics — three tiers:
+Retrieval metrics:
 
-  evidence_hit   — soft content coverage over the full merged context (all chunks together).
-                   word_recall ≥ 0.50 OR num_recall ≥ 0.70. Available for every row.
+  soft_MRR / soft_Recall@3 / soft_NDCG@5
+      Per-chunk soft relevance: max(number_overlap, text_similarity) vs truth passages,
+      threshold 0.30 for binary. Gives credit for "right neighbourhood" retrievals where
+      chunk boundaries don't align with FinDER passages. Available for every row.
 
-  soft_*         — per-chunk soft relevance against truth passages using number overlap
-                   and text similarity. Gives credit for "right neighbourhood" retrievals
-                   where the exact chunk ID was missed. Soft Recall@k, MRR, NDCG@5.
-                   Available for every row (no corpus-lookup dependency).
+  evidence_hit / word_recall / num_recall
+      Lexical coverage of truth passages over the full merged retrieved context.
+      Coarser than soft metrics (no ranking) but robust to any chunking scheme.
 
-  hard_*         — exact chunk-ID matching. Only defined when the truth chunk exists in
-                   the indexed PKL corpus (n_truth_in_corpus > 0). Hard Recall@k, MRR,
-                   NDCG@5. None otherwise.
+  n_truth_in_corpus / n_truth_retrieved / best_truth_rank
+      Raw ground-truth alignment counts. Hard exact-ID metrics are omitted: corpus coverage
+      is ~30-40% and the truth→corpus resolution pipeline is itself approximate, making
+      hard IR metrics noisy and biased toward a non-representative subset.
 
 Generation metrics:
   LLM judge (Phi-4) — relevance YES/NO, completeness YES/NO. Primary signal.
-  Lexical recall  — supplementary only (word_recall, num_recall).
+  Lexical (lex_*) — answer vs truth_answer word/number overlap. Fast supplementary check.
 
 Usage:
     python evaluation_run.py path/to/eval_multi_TSLA_YYYYMMDD_HHMM.json
@@ -35,7 +37,6 @@ from difflib import SequenceMatcher
 from pathlib import Path
 import openpyxl
 
-import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -45,10 +46,8 @@ from evaluation_functions import score_row
 # disabled because we run in batches.
 # EVAL_FILE  = Path("/Users/nadavsmacbookair/Desktop/Thesis/data/eval_results/WMT_eval_20260626_1603.json")
 
-CHUNKS_DIR = Path("/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/chunks/hierarchical/indexed-at-30-06-26-limited-with-enriched/header")
+CHUNKS_DIR = Path("/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/chunks/hierarchical/indexed-at-07-07-26/header")
 
-LOW_SCORE_THRESH      = 0.60   # cosine similarity threshold — only meaningful for dense mode
-SCORE_GAP_THRESH      = 0.03   # min gap between best and worst retrieved score; small gap = undiscriminated results
 FINGERPRINT_LEN       = 200    # chars of normalised text used as a fast exact-match key in fp_index
 FUZZY_THRESH          = 0.80   # SequenceMatcher ratio needed to declare a fuzzy truth-chunk match
 NUM_CONTAINMENT_THRESH = 0.85  # fraction of chunk's numbers that must appear in the truth ref
@@ -105,7 +104,7 @@ def soft_retrieval_metrics(
     retrieved_ids: list[str],
     corpus_text_map: dict[str, str],
     truth_refs: list[str],
-    k_values: tuple = (1, 3, 5),
+    k_values: tuple = (3,),
 ) -> dict:
     """
     Compute soft retrieval metrics using per-chunk relevance scoring.
@@ -126,34 +125,6 @@ def soft_retrieval_metrics(
         result[f"soft_Recall@{k}"] = int(any(binary[:k]))
     return result
 
-
-def hard_retrieval_metrics(
-    retrieved_ids: list[str],
-    truth_corpus_ids: list[list[str]],
-    best_truth_rank,
-    k_values: tuple = (1, 3, 5),
-) -> dict:
-    """
-    Compute exact chunk-ID retrieval metrics.
-    Returns None values when no truth chunks are in corpus.
-    """
-    truth_flat = {cid for ids in truth_corpus_ids for cid in ids}
-    n_truth    = len(truth_flat)
-    none_result = {"hard_MRR": None, "hard_NDCG@5": None}
-    for k in k_values:
-        none_result[f"hard_Recall@{k}"] = None
-    if n_truth == 0:
-        return none_result
-
-    binary    = [1 if cid in truth_flat else 0 for cid in retrieved_ids]
-    result = {
-        "hard_MRR":    1.0 / best_truth_rank if best_truth_rank else 0.0,
-        "hard_NDCG@5": _ndcg_k(binary, 5),
-    }
-    for k in k_values:
-        n_hit = sum(binary[:k])
-        result[f"hard_Recall@{k}"] = n_hit / n_truth
-    return result
 
 
 def load_corpus() -> tuple[pd.DataFrame, dict[str, str], dict[str, str]]:
@@ -176,7 +147,7 @@ def load_corpus() -> tuple[pd.DataFrame, dict[str, str], dict[str, str]]:
         per-chunk relevance against truth passages without re-loading the corpus.
     """
     frames = []
-    for p in sorted(CHUNKS_DIR.glob("*.pkl")):
+    for p in sorted(CHUNKS_DIR.glob("*/*.pkl")):
         with open(p, "rb") as f:
             df = pickle.load(f)
         df["source_file"] = p.name
@@ -277,9 +248,7 @@ def parse_retrieved(retrieved_str: str) -> list[dict]:
         Source Number <n>
          <ScoredPoint repr>
 
-    Each dict contains: chunk_id, score, ticker, fiscal_year_end, section, item.
-    score is a raw float — for hybrid/sparse runs it is an RRF score (not cosine similarity),
-    so LOW_SCORE comparisons are only valid when mode == 'dense'.
+    Each dict contains: chunk_id, ticker, fiscal_year_end, section, subsection, item.
     """
     if not retrieved_str or not isinstance(retrieved_str, str):
         return []
@@ -288,15 +257,16 @@ def parse_retrieved(retrieved_str: str) -> list[dict]:
     for block in blocks:
         if not block.strip():
             continue
-        chunk_id = _re_str(r"\bid='([^']+)'", block)
-        score    = _re_float(r"\bscore=([\d.]+)", block)
-        ticker   = _re_str(r"'ticker':\s*'([^']*)'", block)
-        fy_end   = _re_str(r"'fiscal_year_end':\s*'(\d{4}-\d{2}-\d{2})", block)
-        section  = _re_str(r"'section':\s*'([^']*)'", block)
-        item     = _re_str(r"'item':\s*'([^']*)'", block)
+        chunk_id   = _re_str(r"\bid='([^']+)'", block)
+        ticker     = _re_str(r"'ticker':\s*'([^']*)'", block)
+        fy_end     = _re_str(r"'fiscal_year_end':\s*'(\d{4}-\d{2}-\d{2})", block)
+        section    = _re_str(r"'section':\s*'([^']*)'", block)
+        subsection = _re_str(r"'subsection':\s*'([^']*)'", block)
+        item       = _re_str(r"'item':\s*'([^']*)'", block)
         sources.append({
-            "chunk_id": chunk_id, "score": score, "ticker": ticker,
-            "fiscal_year_end": fy_end, "section": section, "item": item,
+            "chunk_id": chunk_id, "ticker": ticker,
+            "fiscal_year_end": fy_end, "section": section,
+            "subsection": subsection, "item": item,
         })
     return sources
 
@@ -357,21 +327,19 @@ def analyze_entry(idx: str, data: dict, corpus: pd.DataFrame, fp_index: dict,
     Returned dict keys
     ------------------
     idx, run_id, mode, query         — identity fields
-    n_retrieved                      — number of chunks actually returned by the retriever
-    max_score, min_score, mean_score, score_gap
-                                     — score statistics; only interpretable for mode='dense'
-                                       (BM25/RRF scores are unbounded)
-    n_wrong_ticker, n_wrong_year     — filter correctness: chunks that belong to the wrong
-                                       company or fiscal year
+    n_retrieved                      — number of chunks returned by the retriever
+    n_unique_sections                — distinct (section, subsection) pairs in the top-k
+    top_section                      — modal (section, subsection) pair
+    n_wrong_year                     — chunks from the wrong fiscal year
     n_truth_refs                     — number of FinDER ground-truth passages for this question
     n_truth_in_corpus                — how many of those exist in the indexed PKL corpus
     n_truth_retrieved                — how many were actually in the retrieved top-k list
     best_truth_rank                  — 1-based rank of the highest-placed truth chunk (None if missed)
-    truth_chunk_ids                  — space-separated corpus UUIDs (or 'NOT_IN_CORPUS')
+    truth_chunk_ids                  — corpus UUIDs (or 'NOT_IN_CORPUS')
+    soft_MRR, soft_Recall@3, soft_NDCG@5 — per-chunk soft relevance metrics (all rows)
     word_recall, num_recall          — token-level overlap between truth passages and retrieved context
     evidence_hit                     — True if word_recall ≥ 0.50 OR num_recall ≥ 0.70
-    pitfalls                         — comma-separated flags: CROSS_TICKER, WRONG_YEAR,
-                                       LOW_SCORE (dense only), SCORE_GAP_SMALL (dense only),
+    pitfalls                         — comma-separated flags: WRONG_YEAR,
                                        TRUTH_NOT_IN_CORPUS, TRUTH_NOT_RETRIEVED
     """
     finder_id     = data.get("finder_id",    {}).get(idx, "")
@@ -418,30 +386,18 @@ def analyze_entry(idx: str, data: dict, corpus: pd.DataFrame, fp_index: dict,
     retrieved     = parse_retrieved(retrieved_str)
     retrieved_ids = [s["chunk_id"] for s in retrieved if s["chunk_id"]]
 
-    # Most common SEC section among retrieved chunks (for section routing analysis)
-    _sec_counts: dict[str, int] = {}
+    # Modal (section, subsection) pair across retrieved chunks — used for section routing analysis.
+    # A distinct "section" is defined as a unique (section, subsection) combination,
+    # because the payload distributes location across section / subsection / item / subitem.
+    _sec_counts: dict[tuple, int] = {}
     for s in retrieved:
-        sec = s.get("section") or "unknown"
-        _sec_counts[sec] = _sec_counts.get(sec, 0) + 1
-    top_section = max(_sec_counts, key=_sec_counts.get) if _sec_counts else None
+        key = (s.get("section") or "", s.get("subsection") or "")
+        if key != ("", ""):
+            _sec_counts[key] = _sec_counts.get(key, 0) + 1
+    _top_key    = max(_sec_counts, key=_sec_counts.get) if _sec_counts else None
+    top_section = "/".join(filter(None, _top_key)) if _top_key else None
 
-    # ── Score stats ────────────────────────────────────────────────────────────
-    # After the rrf_fuse fix, hybrid/sparse scores are true RRF scores (rank-based,
-    # bounded by 1/(k+1) per list). Absolute thresholds (LOW_SCORE, SCORE_GAP_SMALL)
-    # still only apply to dense (cosine ∈ [0,1]), but std/gap are meaningful for all.
-    scores     = [s["score"] for s in retrieved if s["score"] is not None]
-    max_score  = max(scores) if scores else None
-    min_score  = min(scores) if scores else None
-    score_gap  = round(max_score - min_score, 4) if scores else None
-    mean_score = round(float(np.mean(scores)), 4) if scores else None
-    score_std  = round(float(np.std(scores)), 4) if len(scores) > 1 else None
-
-    # ── Ticker / year correctness ──────────────────────────────────────────────
-    # Checks whether the retriever respected the payload filters
-    n_wrong_ticker = sum(
-        1 for s in retrieved
-        if s["ticker"] and q_ticker and s["ticker"].lower() != q_ticker.lower()
-    )
+    # ── Year filter correctness ────────────────────────────────────────────────
     n_wrong_year = 0
     wrong_year_detail = []
     if q_years:
@@ -480,25 +436,14 @@ def analyze_entry(idx: str, data: dict, corpus: pd.DataFrame, fp_index: dict,
     # score_row compares the truth_refs text against the full retrieved context string
     coverage = score_row(truth_refs, retrieved_str)
 
-    # ── Filter precision ───────────────────────────────────────────────────────
     n_retrieved_total = len(retrieved)
-    year_precision = None
-    if q_years and n_retrieved_total > 0:
-        n_correct_year = sum(
-            1 for s in retrieved
-            if fy_to_year(s["fiscal_year_end"]) in q_years
-        )
-        year_precision = round(n_correct_year / n_retrieved_total, 4)
 
-    ticker_precision = None
-    if q_ticker and n_retrieved_total > 0:
-        n_correct_ticker = sum(
-            1 for s in retrieved
-            if s["ticker"] and s["ticker"].lower() == q_ticker.lower()
-        )
-        ticker_precision = round(n_correct_ticker / n_retrieved_total, 4)
-
-    n_unique_sections = len({s["section"] for s in retrieved if s["section"]})
+    # Count distinct (section, subsection) pairs — each unique pair is one logical section.
+    n_unique_sections = len({
+        (s.get("section") or "", s.get("subsection") or "")
+        for s in retrieved
+        if s.get("section") or s.get("subsection")
+    })
 
     # ── Query-side features ────────────────────────────────────────────────────
     query_length      = len(query.split())
@@ -510,92 +455,111 @@ def analyze_entry(idx: str, data: dict, corpus: pd.DataFrame, fp_index: dict,
     if corpus_text_map is not None and truth_refs:
         soft_metrics = soft_retrieval_metrics(retrieved_ids, corpus_text_map, truth_refs)
     else:
-        soft_metrics = {
-            "soft_MRR": None, "soft_NDCG@5": None,
-            "soft_Recall@1": None, "soft_Recall@3": None, "soft_Recall@5": None,
-        }
-
-    # ── Hard retrieval metrics ─────────────────────────────────────────────────
-    hard_metrics = hard_retrieval_metrics(retrieved_ids, truth_corpus_ids, best_truth_rank)
+        soft_metrics = {"soft_MRR": None, "soft_NDCG@5": None, "soft_Recall@3": None}
 
     # ── Pitfall flags ──────────────────────────────────────────────────────────
     pitfalls = []
-    if n_wrong_ticker > 0:
-        pitfalls.append("CROSS_TICKER")
     if q_years and n_wrong_year > 0:
         pitfalls.append("WRONG_YEAR")
-    # Score-based flags only make sense for dense (cosine similarity in [0,1])
-    if mode in (None, "dense"):
-        if max_score is not None and max_score < LOW_SCORE_THRESH:
-            pitfalls.append("LOW_SCORE")
-        if score_gap is not None and score_gap < SCORE_GAP_THRESH:
-            pitfalls.append("SCORE_GAP_SMALL")
     if truth_refs and n_truth_in_corpus == 0:
         pitfalls.append("TRUTH_NOT_IN_CORPUS")
     elif n_truth_in_corpus > 0 and n_truth_retrieved == 0:
         pitfalls.append("TRUTH_NOT_RETRIEVED")
 
     return {
-        # ── Identity ──
+        # ─── Identity ─────────────────────────────────────────────────────────
         "finder_id":           finder_id,
         "idx":                 int(idx),
         "run_id":              run_id,
         "mode":                mode or "dense",
         "query":               query,
+        # Broad FinDER question category (e.g. "Earnings Per Share", "Risk Factors")
         "category":            category,
+        # Query structure type (e.g. "comparison", "trend"); None = free-form narrative
         "query_type":          query_type,
-        # ── Config columns (None for old-format JSONs) ──
+
+        # ─── Config columns (None for old-format single-config JSONs) ──────────
+        # Short pipeline label, e.g. "header_hybrid_ENH_FLAT_ROUTED"
         "config_key":          config_key,
+        # Chunking granularity ("header" = section-level, "child" = sub-section, …)
         "level":               level,
         "level_num":           level_num,    # 1=header, 2=child, 3=enriched
-        "enhanced":            enhanced,     # YES / NO
-        "tiered":              tiered,       # YES / NO
+        "enhanced":            enhanced,     # YES / NO — was query rewritten by Llama before embedding?
+        "tiered":              tiered,       # YES / NO — was recency-weighted multi-year retrieval used?
         "alpha":               section_alpha,
         "enhance_query_flag":  enhance_query_flag,
         "use_tiered_years":    use_tiered_years,
         "section_alpha":       section_alpha,
         "ticker_filter":       ticker_filter,
-        # ── Retrieval quality ──
+
+        # ─── Retrieval volume ──────────────────────────────────────────────────
+        # Total chunks returned by the retriever (dense / sparse / hybrid)
         "n_retrieved":         n_retrieved_total,
-        "max_score":           round(max_score, 4) if max_score is not None else None,
-        "min_score":           round(min_score, 4) if min_score is not None else None,
-        "mean_score":          mean_score,
-        "score_gap":           score_gap,
-        "score_std":           score_std,
-        # ── Filter precision ──
-        "year_precision":      year_precision,
-        "ticker_precision":    ticker_precision,
+
+        # ─── Section diversity ─────────────────────────────────────────────────
+        # Count of distinct (section, subsection) pairs in the top-k.
+        # High = broad coverage across document structure; low = clustered in one area.
+        # Key diagnostic for section routing: does section_alpha > 0 lower this?
         "n_unique_sections":   n_unique_sections,
+        # Modal (section, subsection) pair across retrieved chunks, e.g. "Item 7/MD&A"
         "top_section":         top_section,
-        # ── Filter leakage counts ──
-        "n_wrong_ticker":      n_wrong_ticker,
+
+        # ─── Filter leakage ────────────────────────────────────────────────────
+        # Chunks from a fiscal year not in q_years (wrong year slipped through filter)
         "n_wrong_year":        n_wrong_year,
         "wrong_year_detail":   "; ".join(wrong_year_detail),
-        # ── Truth chunk lookup ──
+
+        # ─── Ground truth alignment ────────────────────────────────────────────
+        # Number of FinDER reference passages for this question
         "n_truth_refs":        len(truth_refs),
+        # How many truth passages were found in the indexed PKL corpus
+        # (via fingerprint match, number-containment scan, or fuzzy fallback)
         "n_truth_in_corpus":   n_truth_in_corpus,
+        # How many truth chunks appeared anywhere in the retrieved top-k
         "n_truth_retrieved":   n_truth_retrieved,
+        # 1-based rank of the highest-placed truth chunk; None if no truth chunk retrieved
         "best_truth_rank":     best_truth_rank,
         "truth_chunk_ids":     " | ".join(
             ", ".join(ids) if ids else "NOT_IN_CORPUS"
             for ids in truth_corpus_ids
         ),
-        # ── Soft retrieval metrics (all rows) ──
+
+        # ─── Soft retrieval metrics (Tier 1 — all rows) ───────────────────────
+        # Per-chunk relevance = max(num_overlap, text_sim) vs truth passages, threshold 0.30.
+        # Gives credit for "right neighbourhood" retrievals where the exact chunk boundary
+        # doesn't match the FinDER passage. Available for every row (no corpus dependency).
+        # soft_MRR      — 1/rank of the first soft-relevant chunk; 0 if none in top-k
+        # soft_Recall@3 — ≥1 soft-relevant chunk in the top 3 (binary)
+        # soft_NDCG@5   — graded NDCG using raw overlap scores over the top 5
         **soft_metrics,
-        # ── Hard retrieval metrics (None when truth not in corpus) ──
-        **hard_metrics,
-        # ── Lexical coverage (merged context) ──
+
+        # ─── Merged-context lexical coverage ──────────────────────────────────
+        # Truth passages compared against the full concatenated retrieved context string.
+        # Measures whether the right information was retrieved, before generation.
+        # word_recall  — fraction of truth words present in the context
+        # num_recall   — fraction of truth numbers present in the context
+        # evidence_hit — word_recall ≥ 0.50 OR num_recall ≥ 0.70
         "word_recall":         coverage["word_recall"],
         "num_recall":          coverage["num_recall"],
         "evidence_hit":        coverage["evidence_hit"],
-        # ── Query-side features ──
+
+        # ─── Query / answer features (for correlation analysis) ────────────────
+        # Word count of the question text
         "query_length":        query_length,
+        # 1 if the query spans multiple fiscal years, 0 otherwise
         "year_is_multi":       year_is_multi,
+        # Word count of the LLM-generated answer
         "answer_length":       answer_length,
+        # 1 if the generated answer contains any numeric token, 0 otherwise
         "answer_has_number":   answer_has_number,
-        # ── Pitfalls ──
+
+        # ─── Pitfall flags (diagnostic) ────────────────────────────────────────
+        # WRONG_YEAR          — chunks from wrong fiscal year in top-k
+        # TRUTH_NOT_IN_CORPUS — no truth chunk found in indexed corpus
+        # TRUTH_NOT_RETRIEVED — truth chunk in corpus but absent from top-k
         "pitfalls":            ", ".join(pitfalls) if pitfalls else "—",
-        # ── Answers ──
+
+        # ─── Answers ───────────────────────────────────────────────────────────
         "rag_answer":          rag_answer,
         "truth_answer":        truth_answer,
     }
@@ -617,19 +581,16 @@ def print_per_query_table(rows: list[dict]) -> None:
       nr        — num_recall  (0–1)
       in_corp   — n_truth_in_corpus / n_truth_refs
       rank      — best_truth_rank (1-based; — if not retrieved)
-      max_sc    — highest retrieval score (cosine for dense, RRF for hybrid)
-      gap       — score_gap shown only for dense; 'n/a' otherwise
       pitfalls  — comma-separated flag codes
     """
-    W = 140
+    W = 120
     print("\n" + "═" * W)
     print("PER-QUERY RETRIEVAL ANALYSIS")
     print("═" * W)
     print(
         f"{'#':>4}  {'mode':<7}  {'run_id':<28}  {'query':<35}  "
         f"{'hit':>5}  {'wr':>5}  {'nr':>5}  "
-        f"{'in_corp':>7}  {'rank':>5}  "
-        f"{'max_sc':>8}  {'gap':>6}  pitfalls"
+        f"{'in_corp':>7}  {'rank':>5}  pitfalls"
     )
     print("─" * W)
 
@@ -637,14 +598,11 @@ def print_per_query_table(rows: list[dict]) -> None:
         rank_str = str(r["best_truth_rank"]) if r["best_truth_rank"] else "—"
         q_short  = r["query"][:33] + ".." if len(r["query"]) > 35 else r["query"]
         in_corp  = f"{r['n_truth_in_corpus']}/{r['n_truth_refs']}"
-        max_sc_str = f"{r['max_score']:>8.4f}" if r["max_score"] is not None else f"{'n/a':>8}"
-        gap_str    = f"{r['score_gap']:>6.4f}" if (r["score_gap"] is not None and r["mode"] == "dense") else f"{'n/a':>6}"
         print(
             f"{r['idx']:>4}  {r['mode']:<7}  {r['run_id']:<28}  {q_short:<35}  "
             f"{'Y' if r['evidence_hit'] else 'N':>5}  "
             f"{r['word_recall']:>5.2f}  {r['num_recall']:>5.2f}  "
-            f"{in_corp:>7}  {rank_str:>5}  "
-            f"{max_sc_str}  {gap_str}  {r['pitfalls']}"
+            f"{in_corp:>7}  {rank_str:>5}  {r['pitfalls']}"
         )
 
 
@@ -697,10 +655,9 @@ def print_summary(rows: list[dict]) -> None:
     ----------------
     1. Evidence Hit Rate by Mode  — hit%, mean word_recall, mean num_recall per mode
     2. Per-Question Mode Comparison — win/loss matrix (only when len(modes) > 1)
-    3. Score Distribution (dense only) — max_score / score_gap statistics
-    4. Truth Chunk Presence — corpus coverage + per-mode retrieval rate
-    5. Pitfall Breakdown — flag counts per mode
-    6. Cross-Ticker / Cross-Year — global filter leakage counts
+    3. Truth Chunk Presence — corpus coverage + per-mode retrieval rate
+    4. Pitfall Breakdown — flag counts per mode
+    5. Cross-Year — global filter leakage count
     """
     df = pd.DataFrame(rows)
     n  = len(df)
@@ -744,19 +701,6 @@ def print_summary(rows: list[dict]) -> None:
                     print(f"  {m1} vs {m2}:  both={both}  only_{m1}={only_m1}  only_{m2}={only_m2}  neither={neither}")
         print()
 
-    # ── Score distribution (dense only — BM25 scores are unbounded) ──────────
-    dense_df = df[df["mode"] == "dense"]
-    if not dense_df.empty:
-        print("── Score Distribution (dense mode only) ────────────")
-        ms = dense_df["max_score"].dropna()
-        gs = dense_df["score_gap"].dropna()
-        if not ms.empty:
-            print(f"  max_score  : mean {ms.mean():.4f}  min {ms.min():.4f}  max {ms.max():.4f}")
-            print(f"  score_gap  : mean {gs.mean():.4f}  median {gs.median():.4f}")
-            low_sc = (ms < LOW_SCORE_THRESH).sum()
-            print(f"  queries w/ max_score < {LOW_SCORE_THRESH}: {low_sc}/{len(dense_df)}")
-        print()
-
     # ── Truth chunk presence ──────────────────────────────────────────────────
     # ref_rows: use a single mode to count corpus coverage (truth lookup is mode-agnostic)
     print("── Truth Chunk Presence ────────────────────────────")
@@ -787,15 +731,45 @@ def print_summary(rows: list[dict]) -> None:
             print(f"  {mode:<8}: none")
     print()
 
-    # ── Cross-ticker / cross-year ──────────────────────────────────────────────
-    print("── Cross-Ticker / Cross-Year ───────────────────────")
-    ct = (df["n_wrong_ticker"] > 0).sum()
-    cy = (df["n_wrong_year"]   > 0).sum()
-    print(f"  cross-ticker retrieval : {ct}/{n}")
-    print(f"  cross-year  retrieval  : {cy}/{n}")
+    # ── Cross-year ─────────────────────────────────────────────────────────────
+    print("── Cross-Year ──────────────────────────────────────")
+    cy = (df["n_wrong_year"] > 0).sum()
+    print(f"  cross-year retrieval : {cy}/{n}")
 
 
 # ── Answer judges ─────────────────────────────────────────────────────────────
+
+# config_key format from run_rag_lazy.py's write_config: level 1 (header), BM25
+# (sparse), no query enhancement, section_alpha=0 (no section routing).
+BASELINE_CONFIG_KEY = "L1_BM25_PLAIN_A0"
+
+
+def _attach_baseline_answers(rows: list[dict]) -> None:
+    """
+    Fetch each row's baseline_answer: the rag_answer from the fixed baseline
+    config (BASELINE_CONFIG_KEY) for the same (finder_id, ticker_filter) pair.
+
+    Keyed on (finder_id, ticker_filter) not just finder_id so that multi-ticker
+    evals (e.g. TSLA + PYPL in one JSON) each get their own company's baseline
+    answer rather than whichever company's row was processed last.
+
+    Rows where no baseline exists in the sweep get baseline_answer = "".
+    """
+    baseline_by_key = {
+        (row["finder_id"], row.get("ticker_filter", "")): row.get("rag_answer", "")
+        for row in rows
+        if row.get("config_key") == BASELINE_CONFIG_KEY
+    }
+    n_missing = 0
+    for row in rows:
+        key = (row.get("finder_id"), row.get("ticker_filter", ""))
+        row["baseline_answer"] = baseline_by_key.get(key, "")
+        if not row["baseline_answer"]:
+            n_missing += 1
+    if n_missing:
+        print(f"  [warn] {n_missing} row(s) have no baseline answer "
+              f"(config '{BASELINE_CONFIG_KEY}' absent or ticker mismatch)")
+
 
 def judge_lexical(rag_answer: str, truth_answer: str) -> dict:
     """
@@ -817,17 +791,17 @@ def judge_lexical(rag_answer: str, truth_answer: str) -> dict:
     }
 
 
-def judge_llm(question: str, truth_answer: str, rag_answer: str, model, tokenizer) -> dict:
+def judge_llm(question: str, truth_answer: str, rag_answer: str, baseline_answer: str, model, tokenizer) -> dict:
     """
-    LLM-based judge using JUDGE_PROMPT. Scores the generated answer on relevance and
-    completeness (each YES/NO) relative to the ground truth.
+    LLM-based judge using JUDGE_PROMPT. Pairwise-compares rag_answer (A) against
+    baseline_answer (B) on relevance and completeness relative to the ground truth.
 
     Uses Phi-4 (`mlx-community/phi-4-4bit`) — a different architecture and training
     from Llama-3.2-3B (the generation model) — which eliminates self-serving bias.
     Runs post-hoc from saved eval JSON; no concurrency conflict with generation.
 
-    Returns llm_relevance, llm_completeness (YES/NO strings), and llm_response (full
-    raw model output for inspection).
+    Returns relevance, completeness ("A"/"B" strings — which answer won),
+    and judge_response (full raw model output for inspection).
     """
     sys.path.append(str(Path(__file__).resolve().parent.parent))
     from prompts import JUDGE_PROMPT
@@ -837,27 +811,82 @@ def judge_llm(question: str, truth_answer: str, rag_answer: str, model, tokenize
         question=question,
         answer_ref=truth_answer,
         answer_a=rag_answer,
+        answer_b=baseline_answer,
     )
+    breakpoint()
     messages  = [{"role": "user", "content": prompt_text}]
     formatted = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    response  = generate(model, tokenizer, prompt=formatted, verbose=False, max_tokens=300)
+    response  = generate(model, tokenizer, prompt=formatted, verbose=False)
 
     try:
         m = re.search(r'\{[^}]+\}', response, re.DOTALL)
         if m:
             parsed = json.loads(m.group())
             return {
-                "llm_relevance":    parsed.get("relevance",    "?"),
-                "llm_completeness": parsed.get("completeness", "?"),
-                "llm_response":     response.strip(),
+                "relevance":     parsed.get("relevance",    "?"),
+                "completeness":  parsed.get("completeness", "?"),
+                "judge_response": response.strip(),
             }
     except Exception:
         pass
     return {
-        "llm_relevance":    "parse_error",
-        "llm_completeness": "parse_error",
-        "llm_response":     response.strip(),
+        "relevance":     "parse_error",
+        "completeness":  "parse_error",
+        "judge_response": response.strip(),
     }
+
+
+def _judge_unjudged_rows(rows_df: pd.DataFrame, judge_model, judge_tok) -> pd.DataFrame:
+    """
+    Run judge_llm over every row that hasn't been judged yet, mutating rows_df in place.
+
+    "Unjudged" = relevance is null. This makes judging resumable/idempotent: calling
+    this twice on the same DataFrame (e.g. apply_llm_judge run again after an interrupted
+    pass) only pays for the rows still missing a verdict — already-judged rows (including
+    "is_baseline"/"no_baseline"/"parse_error" sentinels) are left untouched.
+
+    Requires columns: query, truth_answer, rag_answer, baseline_answer, config_key.
+    """
+    required = {"query", "truth_answer", "rag_answer", "baseline_answer", "config_key"}
+    missing = required - set(rows_df.columns)
+    if missing:
+        raise ValueError(
+            f"rows_df is missing columns required for judging: {sorted(missing)}. "
+            "Was it produced by the stage-1 analysis (run_analysis / run_multi_analysis)?"
+        )
+
+    # Creation order fixes column order in the DataFrame: judge_response, relevance,
+    # completeness — appended right after baseline_answer.
+    for col in ("judge_response", "relevance", "completeness"):
+        if col not in rows_df.columns:
+            rows_df[col] = None
+
+    todo = rows_df.index[rows_df["relevance"].isna()]
+    print(f"  Judging {len(todo)}/{len(rows_df)} unjudged row(s) with Phi-4…")
+    for i, idx in enumerate(todo):
+        row      = rows_df.loc[idx]
+        baseline = row.get("baseline_answer", "")
+        if row.get("config_key") == BASELINE_CONFIG_KEY:
+            # This row IS the baseline — skip self-comparison
+            scores = {"relevance": "is_baseline", "completeness": "is_baseline", "judge_response": ""}
+        elif not baseline:
+            # Baseline config absent from this sweep — skip rather than judge against ""
+            scores = {"relevance": "no_baseline", "completeness": "no_baseline", "judge_response": ""}
+        else:
+            scores = judge_llm(
+                question=row["query"],
+                truth_answer=row.get("truth_answer", ""),
+                rag_answer=row.get("rag_answer", ""),
+                baseline_answer=baseline,
+                model=judge_model, tokenizer=judge_tok,
+            )
+        for k, v in scores.items():
+            rows_df.at[idx, k] = v
+        sys.stdout.write(f"\r  [{i+1:>3}/{len(todo)}] judged")
+        sys.stdout.flush()
+    if len(todo):
+        print()
+    return rows_df
 
 
 def print_judge_summary(rows: list[dict], use_llm_judge: bool) -> None:
@@ -865,8 +894,8 @@ def print_judge_summary(rows: list[dict], use_llm_judge: bool) -> None:
     Print answer-quality summary.
 
     Lexical section: always printed. Shows lex_hit rate, mean word/num recall per mode.
-    LLM section: only printed when use_llm_judge=True. Shows YES rate for relevance
-    and completeness per mode.
+    LLM section: only printed when use_llm_judge=True. Shows the rate at which rag_answer
+    (A) was judged better than baseline_answer (B) on relevance and completeness, per mode.
     """
     df    = pd.DataFrame(rows)
     modes = sorted(df["mode"].unique())
@@ -887,15 +916,15 @@ def print_judge_summary(rows: list[dict], use_llm_judge: bool) -> None:
     print()
 
     if use_llm_judge:
-        print("── LLM Judge / Phi-4 (relevance & completeness) ───")
+        print("── LLM Judge / Phi-4 (rag_answer vs baseline_answer) ───")
         for mode in modes:
-            sub      = df[df["mode"] == mode]
-            mn       = len(sub)
-            rel_yes  = (sub["llm_relevance"]    == "YES").sum()
-            comp_yes = (sub["llm_completeness"] == "YES").sum()
-            parse_err = (sub["llm_relevance"] == "parse_error").sum()
-            print(f"  {mode:<8}: relevance={rel_yes}/{mn} ({rel_yes/mn*100:.1f}%)  "
-                  f"completeness={comp_yes}/{mn} ({comp_yes/mn*100:.1f}%)"
+            sub       = df[df["mode"] == mode]
+            mn        = len(sub)
+            rel_win   = (sub["relevance"]    == "A").sum()
+            comp_win  = (sub["completeness"] == "A").sum()
+            parse_err = (sub["relevance"] == "parse_error").sum()
+            print(f"  {mode:<8}: relevance_win={rel_win}/{mn} ({rel_win/mn*100:.1f}%)  "
+                  f"completeness_win={comp_win}/{mn} ({comp_win/mn*100:.1f}%)"
                   + (f"  [parse_errors={parse_err}]" if parse_err else ""))
         print()
 
@@ -907,18 +936,22 @@ def run_analysis(
     corpus:       pd.DataFrame,
     fp_index:     dict,
     corpus_text_map: dict[str, str] | None = None,
-    use_llm_judge: bool = False,
     judge_model   = None,
     judge_tok     = None,
 ) -> None:
     """
-    Analyse one eval JSON file and save an Excel + TXT report alongside it.
+    Stage 1 (+ optional stage 2): analyse one eval JSON file and save an Excel + TXT
+    report alongside it. Accepts pre-loaded corpus and judge model so batch callers
+    can load them once and reuse across multiple eval files.
 
-    Accepts pre-loaded corpus and judge model so batch callers can load them
-    once and reuse across multiple eval files.
+    Retrieval analysis + the lexical judge always run and never require a model.
+    LLM judging only runs when judge_model is given, via the same resumable
+    _judge_unjudged_rows() path used by apply_llm_judge() — see that function to
+    add judging later, on top of the saved pickle, without rerunning retrieval
+    analysis.
     """
     print(f"\nEval file : {eval_path}")
-    print(f"LLM judge : {'Phi-4 (enabled)' if use_llm_judge else 'disabled'}")
+    print(f"LLM judge : {'Phi-4 (enabled)' if judge_model is not None else 'disabled'}")
     with open(eval_path) as f:
         data = json.load(f)
 
@@ -937,20 +970,12 @@ def run_analysis(
     for row in rows:
         row.update(judge_lexical(row.get("rag_answer", ""), row.get("truth_answer", "")))
 
+    # ── Baseline answer — fetched from the matching baseline-config row, if present ──
+    _attach_baseline_answers(rows)
+
     # ── LLM judge — optional, post-hoc, uses Phi-4 ──
-    if use_llm_judge and judge_model is not None:
-        print(f"  Judging {len(rows)} rows with Phi-4…")
-        for i, row in enumerate(rows):
-            scores = judge_llm(
-                row["query"],
-                row.get("truth_answer", ""),
-                row.get("rag_answer", ""),
-                judge_model, judge_tok,
-            )
-            row.update(scores)
-            sys.stdout.write(f"\r  [{i+1:>3}/{len(rows)}] judged")
-            sys.stdout.flush()
-        print()
+    if judge_model is not None:
+        rows = _judge_unjudged_rows(pd.DataFrame(rows), judge_model, judge_tok).to_dict("records")
 
     # ── Print full detail to stdout, capture only summary sections for txt ──
     print_per_query_table(rows)
@@ -967,7 +992,7 @@ def run_analysis(
         summary_parts.append(text)
 
     _capture(print_summary,      rows)
-    _capture(print_judge_summary, rows, use_llm_judge)
+    _capture(print_judge_summary, rows, judge_model is not None)
 
     out_xlsx = eval_path.parent / "analysis" / eval_path.name.replace("eval_", "analysis_").replace(".json", ".xlsx")
     out_txt  = out_xlsx.with_suffix(".txt")
@@ -1000,9 +1025,11 @@ def _write_multi_excel(rows_df: pd.DataFrame, out_path: Path) -> None:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    for col in ("llm_relevance", "llm_completeness"):
+    # "_int" = 1.0 when rag_answer (A) beat baseline_answer (B), 0.0 when B won,
+    # NaN for rows that weren't judged (is_baseline / no_baseline / parse_error).
+    for col in ("relevance", "completeness"):
         if col in df.columns:
-            df[col + "_int"] = (df[col] == "YES").astype(float)
+            df[col + "_int"] = df[col].map({"A": 1.0, "B": 0.0})
 
     group_col = "config_key" if "config_key" in df.columns and df["config_key"].notna().any() else "mode"
 
@@ -1019,14 +1046,9 @@ def _write_multi_excel(rows_df: pd.DataFrame, out_path: Path) -> None:
             "soft_MRR": "mean",
             "soft_Recall@3": "mean",
             "soft_NDCG@5": "mean",
-            "hard_MRR": "mean",
-            "hard_Recall@3": "mean",
-            "hard_NDCG@5": "mean",
-            "year_precision": "mean",
-            "ticker_precision": "mean",
             "n_truth_in_corpus": "sum",
         }
-        for col in ("llm_relevance_int", "llm_completeness_int"):
+        for col in ("relevance_int", "completeness_int"):
             if col in df.columns:
                 agg_dict[col] = "mean"
         for col in ("level", "mode", "enhance_query_flag", "use_tiered_years", "section_alpha"):
@@ -1036,7 +1058,7 @@ def _write_multi_excel(rows_df: pd.DataFrame, out_path: Path) -> None:
         cfg_sum = df.groupby(group_col, dropna=False).agg(agg_dict).reset_index()
         cfg_sum.rename(columns={"finder_id": "n_rows"}, inplace=True)
 
-        sort_col = "llm_relevance_int" if "llm_relevance_int" in cfg_sum.columns else "evidence_hit"
+        sort_col = "relevance_int" if "relevance_int" in cfg_sum.columns else "evidence_hit"
         cfg_sum = cfg_sum.sort_values(sort_col, ascending=False)
         cfg_sum.to_excel(writer, sheet_name="config_summary", index=False)
 
@@ -1044,7 +1066,7 @@ def _write_multi_excel(rows_df: pd.DataFrame, out_path: Path) -> None:
         cat_cols = ["category", group_col]
         cat_agg: dict = {"finder_id": "count", "evidence_hit": "mean", "soft_MRR": "mean",
                          "soft_Recall@3": "mean"}
-        for col in ("llm_relevance_int", "llm_completeness_int"):
+        for col in ("relevance_int", "completeness_int"):
             if col in df.columns:
                 cat_agg[col] = "mean"
         if "category" in df.columns:
@@ -1052,9 +1074,9 @@ def _write_multi_excel(rows_df: pd.DataFrame, out_path: Path) -> None:
             cat_bd.rename(columns={"finder_id": "n_rows"}, inplace=True)
             cat_bd.to_excel(writer, sheet_name="category_breakdown", index=False)
 
-        # ── Sheet 4: failure_analysis ────────────────────────────────────────
-        if "llm_relevance" in df.columns:
-            fail_mask = (df["llm_relevance"] == "NO") | (df["llm_completeness"] == "NO")
+        # ── Sheet 4: failure_analysis ─── rows where baseline_answer (B) beat rag_answer (A)
+        if "relevance" in df.columns:
+            fail_mask = (df["relevance"] == "B") | (df["completeness"] == "B")
         else:
             fail_mask = df["evidence_hit"] == 0
         fail_df = df[fail_mask].copy()
@@ -1064,12 +1086,10 @@ def _write_multi_excel(rows_df: pd.DataFrame, out_path: Path) -> None:
 
         # ── Sheet 5: correlations ────────────────────────────────────────────
         corr_cols = [c for c in [
-            "query_length", "year_is_multi", "n_retrieved", "score_std",
+            "query_length", "year_is_multi", "n_retrieved", "n_unique_sections",
             "enhance_query_flag", "use_tiered_years", "section_alpha",
-            "llm_relevance_int", "llm_completeness_int",
+            "relevance_int", "completeness_int",
             "evidence_hit", "soft_MRR", "soft_Recall@3", "soft_NDCG@5",
-            "hard_MRR", "hard_Recall@3",
-            "year_precision", "ticker_precision",
         ] if c in df.columns]
         corr_df = df[corr_cols].apply(pd.to_numeric, errors="coerce").corr()
         corr_df.to_excel(writer, sheet_name="correlations")
@@ -1083,8 +1103,7 @@ def _write_multi_excel(rows_df: pd.DataFrame, out_path: Path) -> None:
         metric_cols = [c for c in [
             "evidence_hit", "word_recall", "num_recall",
             "soft_MRR", "soft_Recall@3", "soft_NDCG@5",
-            "hard_MRR", "hard_Recall@3",
-            "llm_relevance_int", "llm_completeness_int",
+            "relevance_int", "completeness_int",
         ] if c in df.columns]
         dim_frames = []
         for dim in dim_axes:
@@ -1122,10 +1141,13 @@ def run_multi_analysis(
     judge_tok    = None,
 ) -> pd.DataFrame:
     """
-    Primary entry point for multi-config eval JSONs produced by run_rag_lazy.py.
+    One-click entry point for multi-config eval JSONs produced by run_rag_lazy.py.
 
-    Runs analyze_entry for every row, applies LLM judge (if models provided),
-    writes a 5-sheet Excel, and returns the rows DataFrame.
+    Runs analyze_entry + the (free) lexical judge for every row, then — if judge_model
+    is given — runs the LLM judge (judge_llm, using JUDGE_PROMPT) inline in the same
+    pass. Writes one pickle + one multi-sheet Excel and returns the rows DataFrame.
+
+    Pass judge_model=None to skip LLM judging entirely (fast, no model load).
     """
     print(f"\nEval file : {eval_path}")
     with open(eval_path) as f:
@@ -1146,25 +1168,46 @@ def run_multi_analysis(
     for row in rows:
         row.update(judge_lexical(row.get("rag_answer", ""), row.get("truth_answer", "")))
 
-    if judge_model is not None:
-        print(f"  Judging {len(rows)} rows with Phi-4…")
-        for i, row in enumerate(rows):
-            row.update(judge_llm(
-                row["query"], row.get("truth_answer", ""), row.get("rag_answer", ""),
-                judge_model, judge_tok,
-            ))
-            sys.stdout.write(f"\r  [{i+1:>3}/{len(rows)}] judged")
-            sys.stdout.flush()
-        print()
+    # ── Baseline answer — fetched from the matching baseline-config row, if present ──
+    _attach_baseline_answers(rows)
 
     rows_df = pd.DataFrame(rows)
+
+    # ── LLM judge — optional, runs inline as part of the same pass ──────────────
+    if judge_model is not None:
+        rows_df = _judge_unjudged_rows(rows_df, judge_model, judge_tok)
 
     out_dir  = eval_path.parent / "analysis"
     out_xlsx = out_dir / eval_path.name.replace("eval_", "analysis_").replace(".json", ".xlsx")
     out_pkl  = out_xlsx.with_suffix(".pkl")
-    _write_multi_excel(rows_df, out_xlsx)
+    out_pkl.parent.mkdir(parents=True, exist_ok=True)
+
     rows_df.to_pickle(out_pkl)
+    _write_multi_excel(rows_df, out_xlsx)
     print(f"Saved → {out_pkl}")
+
+    _print_multi_summary(rows_df)
+    _print_baseline_delta_summary(rows_df)
+
+    return rows_df
+
+
+def apply_llm_judge(analysis_pkl: Path, judge_model, judge_tok) -> pd.DataFrame:
+    """
+    Optional standalone helper: load an existing analysis pickle and run the LLM judge
+    on any rows without a verdict yet, in place. Not part of the one-click flow —
+    run_multi_analysis / run_analysis already run judging inline when given a
+    judge_model. Use this only to add judging on top of a pickle that was produced
+    without a judge_model.
+    """
+    print(f"\nAnalysis pickle : {analysis_pkl}")
+    rows_df = pd.read_pickle(analysis_pkl)
+    rows_df = _judge_unjudged_rows(rows_df, judge_model, judge_tok)
+
+    rows_df.to_pickle(analysis_pkl)
+    out_xlsx = analysis_pkl.with_suffix(".xlsx")
+    _write_multi_excel(rows_df, out_xlsx)
+    print(f"Saved → {analysis_pkl}")
 
     _print_multi_summary(rows_df)
     _print_baseline_delta_summary(rows_df)
@@ -1184,25 +1227,27 @@ def _print_multi_summary(df: pd.DataFrame) -> None:
     for col in ("evidence_hit", "soft_MRR", "soft_Recall@3"):
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
-    for col in ("llm_relevance", "llm_completeness"):
+    # "_int" = 1.0 when rag_answer (A) beat baseline_answer (B), 0.0 when B won,
+    # NaN for rows that weren't judged (is_baseline / no_baseline / parse_error).
+    for col in ("relevance", "completeness"):
         if col in df.columns:
-            df[col + "_int"] = (df[col] == "YES").astype(float)
+            df[col + "_int"] = df[col].map({"A": 1.0, "B": 0.0})
 
     agg: dict = {"finder_id": "count", "evidence_hit": "mean", "word_recall": "mean",
                  "num_recall": "mean", "soft_MRR": "mean", "soft_Recall@3": "mean"}
-    for c in ("llm_relevance_int", "llm_completeness_int"):
+    for c in ("relevance_int", "completeness_int"):
         if c in df.columns:
             agg[c] = "mean"
     ranked = df.groupby(group_col).agg(agg).reset_index()
     ranked.rename(columns={"finder_id": "n"}, inplace=True)
-    sort_col = "llm_relevance_int" if "llm_relevance_int" in ranked else "evidence_hit"
+    sort_col = "relevance_int" if "relevance_int" in ranked else "evidence_hit"
     ranked = ranked.sort_values(sort_col, ascending=False)
 
-    print(f"\n{'config_key':<55} {'n':>4}  {'llm_rel%':>8}  {'llm_comp%':>9}  {'soft_MRR':>8}  {'Recall@3':>8}  {'evi_hit%':>8}  {'word_rec':>8}  {'num_rec':>7}")
+    print(f"\n{'config_key':<55} {'n':>4}  {'rel_win%':>8}  {'cmp_win%':>9}  {'soft_MRR':>8}  {'Recall@3':>8}  {'evi_hit%':>8}  {'word_rec':>8}  {'num_rec':>7}")
     print("─" * 125)
     for _, r in ranked.iterrows():
-        rel  = f"{r.get('llm_relevance_int', float('nan'))*100:.1f}" if "llm_relevance_int" in r and pd.notna(r.get("llm_relevance_int")) else "  n/a"
-        comp = f"{r.get('llm_completeness_int', float('nan'))*100:.1f}" if "llm_completeness_int" in r and pd.notna(r.get("llm_completeness_int")) else "  n/a"
+        rel  = f"{r.get('relevance_int', float('nan'))*100:.1f}" if "relevance_int" in r and pd.notna(r.get("relevance_int")) else "  n/a"
+        comp = f"{r.get('completeness_int', float('nan'))*100:.1f}" if "completeness_int" in r and pd.notna(r.get("completeness_int")) else "  n/a"
         mrr  = f"{r['soft_MRR']:.3f}" if pd.notna(r.get("soft_MRR")) else "  n/a"
         rc3  = f"{r.get('soft_Recall@3', float('nan')):.3f}" if pd.notna(r.get("soft_Recall@3")) else "  n/a"
         hit  = f"{r['evidence_hit']*100:.1f}" if pd.notna(r.get("evidence_hit")) else "  n/a"
@@ -1210,11 +1255,11 @@ def _print_multi_summary(df: pd.DataFrame) -> None:
         nr   = f"{r['num_recall']:.3f}" if pd.notna(r.get("num_recall")) else "  n/a"
         print(f"  {str(r[group_col]):<53} {int(r['n']):>4}  {rel:>8}  {comp:>9}  {mrr:>8}  {rc3:>8}  {hit:>8}  {wr:>8}  {nr:>7}")
 
-    if "category" in df.columns and "llm_relevance" in df.columns:
-        fail = df[df["llm_relevance"] == "NO"]
+    if "category" in df.columns and "relevance" in df.columns:
+        fail = df[df["relevance"] == "B"]
         if not fail.empty:
             top_fail = fail.groupby("category").size().sort_values(ascending=False).head(5)
-            print(f"\nTop failure categories (llm_relevance=NO):")
+            print(f"\nTop failure categories (baseline beat rag on relevance, relevance=B):")
             for cat, cnt in top_fail.items():
                 total_cat = (df["category"] == cat).sum()
                 print(f"  {cat:<40} {cnt}/{total_cat}")
@@ -1237,9 +1282,8 @@ _CMP_METRICS: list[tuple[str, str, str]] = [
     ("soft_MRR",             "sft_MRR", ".3f"),
     ("soft_Recall@3",        "R@3",     ".3f"),
     ("soft_NDCG@5",          "NDCG@5",  ".3f"),
-    ("hard_MRR",             "hrd_MRR", ".3f"),
-    ("llm_relevance_int",    "llm_rel", ".3f"),
-    ("llm_completeness_int", "llm_cmp", ".3f"),
+    ("relevance_int",        "rel",     ".3f"),
+    ("completeness_int",     "cmp",     ".3f"),
 ]
 
 
@@ -1247,34 +1291,13 @@ def _find_baseline_cfg(df: pd.DataFrame, group_col: str) -> str | None:
     """
     Return the config_key that represents the baseline.
 
-    Hard requirements: section_alpha=0 AND use_tiered_years=False (FLAT).
-    Tiebreaker (preference order): level 1 first, then sparse/BM25 mode.
-    Falls back to the config with the lowest evidence_hit mean.
+    Fixed to BASELINE_CONFIG_KEY ("L1_BM25_PLAIN_A0") — no performance-based
+    fallback, since the baseline is a fixed reference point and may legitimately
+    be outperformed by other configs. Returns None if that key isn't in this
+    sweep (callers already handle None).
     """
-    candidates = []
-    for cfg, grp in df.groupby(group_col, dropna=False):
-        r = grp.iloc[0]
-        alpha_ok   = float(r.get("section_alpha") or 0) == 0.0
-        tiered_ok  = not bool(pd.to_numeric(r.get("use_tiered_years",   0) or 0, errors="coerce"))
-        enhance_ok = not bool(pd.to_numeric(r.get("enhance_query_flag", 0) or 0, errors="coerce"))
-        if not (alpha_ok and tiered_ok and enhance_ok):
-            continue
-        is_l1     = ("level 1" in str(r.get("level", "") or "").lower()
-                     or str(cfg or "").upper().startswith("L1"))
-        is_sparse = str(r.get("mode", "") or "").lower() in ("sparse", "bm25")
-        candidates.append((cfg, is_l1, is_sparse))
-
-    if candidates:
-        # sort so level-1 comes first, then sparse, then anything else
-        best = sorted(candidates, key=lambda x: (not x[1], not x[2]))[0]
-        return str(best[0])
-
-    # fallback: lowest-performing config
-    if "evidence_hit" in df.columns:
-        agg = df.groupby(group_col, dropna=False)["evidence_hit"].apply(
-            lambda s: pd.to_numeric(s, errors="coerce").mean()
-        )
-        return str(agg.idxmin())
+    if BASELINE_CONFIG_KEY in df[group_col].astype(str).values:
+        return BASELINE_CONFIG_KEY
     return None
 
 
@@ -1289,9 +1312,11 @@ def _build_delta_df(df: pd.DataFrame, group_col: str) -> tuple[pd.DataFrame, str
     for col in ("evidence_hit", "use_tiered_years", "enhance_query_flag", "section_alpha"):
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
-    for col in ("llm_relevance", "llm_completeness"):
+    # "_int" = 1.0 when rag_answer (A) beat baseline_answer (B), 0.0 when B won,
+    # NaN for rows that weren't judged (is_baseline / no_baseline / parse_error).
+    for col in ("relevance", "completeness"):
         if col in df.columns:
-            df[col + "_int"] = (df[col] == "YES").astype(float)
+            df[col + "_int"] = df[col].map({"A": 1.0, "B": 0.0})
 
     present = [col for col, _, _ in _CMP_METRICS if col in df.columns]
     if not present:
@@ -1317,7 +1342,7 @@ def _build_delta_df(df: pd.DataFrame, group_col: str) -> tuple[pd.DataFrame, str
         rows.append(rec)
 
     result   = pd.DataFrame(rows)
-    sort_col = next((c for c in ["llm_relevance_int", "evidence_hit", "soft_MRR"] if c in result.columns), None)
+    sort_col = next((c for c in ["relevance_int", "evidence_hit", "soft_MRR"] if c in result.columns), None)
     if sort_col:
         result = result.sort_values(sort_col, ascending=False, ignore_index=True)
     return result, baseline_cfg
@@ -1366,6 +1391,9 @@ def _print_baseline_delta_summary(df: pd.DataFrame) -> None:
     group_col = "config_key" if "config_key" in df.columns and df["config_key"].notna().any() else "mode"
     delta_df, baseline_cfg = _build_delta_df(df, group_col)
     if delta_df.empty:
+        return
+    if baseline_cfg is None:
+        print(f"\n  (baseline config '{BASELINE_CONFIG_KEY}' not present in this sweep — skipping delta summary)")
         return
 
     present = [(col, lbl, fmt) for col, lbl, fmt in _CMP_METRICS if col in df.columns]
@@ -1720,54 +1748,31 @@ def _write_section_routing_sheet(df: pd.DataFrame, writer: "pd.ExcelWriter") -> 
 
 def main():
     """
-    CLI entry point. Accepts a positional path to a multi-config eval JSON.
-    Loads corpus once; optionally loads Phi-4 when --judge flag is passed.
-
-    Usage:
-        python evaluation_run.py path/to/eval_multi_TSLA_*.json [--judge]
+    One-click pipeline. Analyses every file in eval_files in one pass each:
+    retrieval analysis + lexical judge always run; set USE_LLM_JUDGE=True to also
+    run the LLM judge (judge_llm, via JUDGE_PROMPT) inline, in the same pass, for
+    every file.
     """
-    use_llm_judge = "--judge" in sys.argv
-    positional    = [a for a in sys.argv[1:] if not a.startswith("--")]
-    eval_path     = Path(positional[0])
+    USE_LLM_JUDGE = True
+
+    eval_files = [
+        "/Users/nadavsmacbookair/Desktop/Thesis/data/eval_results/eval_multi_TSLA_20260708_merged_1413_1437.json",
+    ]
 
     print(f"Corpus dir: {CHUNKS_DIR}")
     corpus, fp_index, corpus_text_map = load_corpus()
     print(f"  Loaded {len(corpus)} chunks from {corpus['source_file'].nunique()} PKL files")
 
     judge_model, judge_tok = None, None
-    if use_llm_judge:
+    if USE_LLM_JUDGE:
         from mlx_lm import load as mlx_load
         print("\nLoading Phi-4 judge model…")
         judge_model, judge_tok = mlx_load("mlx-community/phi-4-4bit")
 
-    run_multi_analysis(eval_path, corpus, fp_index, corpus_text_map, judge_model, judge_tok)
+    for i, ef in enumerate(eval_files):
+        print(f"\n{'='*60}\nBatch {i+1}/{len(eval_files)}: {Path(ef).name}\n{'='*60}")
+        run_multi_analysis(Path(ef), corpus, fp_index, corpus_text_map, judge_model, judge_tok)
 
 
 if __name__ == "__main__":
-    # ── Batch mode: define multi-config eval files to analyse in sequence ─────
-    # Corpus and judge model are loaded ONCE and reused across all files.
-    # To run a single file from the CLI:
-    #   python evaluation_run.py path/to/eval_multi_TSLA_*.json [--judge]
-
-    USE_LLM_JUDGE = False   # set True to enable Phi-4 judging for all runs
-
-    eval_files = [
-        "/Users/nadavsmacbookair/Desktop/Thesis/data/eval_results/eval_multi_PYPL-TSLA_20260701_1243.json",
-    ]
-
-    if not eval_files:
-        main()
-    else:
-        print(f"Corpus dir: {CHUNKS_DIR}")
-        corpus, fp_index, corpus_text_map = load_corpus()
-        print(f"  Loaded {len(corpus)} chunks from {corpus['source_file'].nunique()} PKL files")
-
-        judge_model, judge_tok = None, None
-        if USE_LLM_JUDGE:
-            from mlx_lm import load as mlx_load
-            print("\nLoading Phi-4 judge model…")
-            judge_model, judge_tok = mlx_load("mlx-community/phi-4-4bit")
-
-        for i, ef in enumerate(eval_files):
-            print(f"\n{'='*60}\nBatch {i+1}/{len(eval_files)}: {Path(ef).name}\n{'='*60}")
-            run_multi_analysis(Path(ef), corpus, fp_index, corpus_text_map, judge_model, judge_tok)
+    main()

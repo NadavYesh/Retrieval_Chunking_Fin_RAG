@@ -29,12 +29,12 @@ _RRF_K   = 60  # standard RRF constant
 # ── category → target item numbers ──────────────────────────────────────────
 CATEGORY_ITEMS: dict[str, frozenset[str]] = {
     "company overview":   frozenset(["1"]),
-    "financials":         frozenset(["7", "7a", "8"]),
+    "financials":         frozenset(["7", "7a","7 a", "8"]),
     "footnotes":          frozenset(["8"]),
     "governance":         frozenset(["10", "11", "12", "13", "14"]),
     "accounting":         frozenset(["8"]),
     "shareholder return": frozenset(["5"]),
-    "risk":               frozenset(["1a"]),
+    "risk":               frozenset(["1a","1 a"]),
     "legal":              frozenset(["3"]),
 }
 

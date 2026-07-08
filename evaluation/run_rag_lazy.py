@@ -24,27 +24,26 @@ from search_engine import (
 )
 from FinDER import run_finder
 from evaluation.section_routing import make_section_filter, section_fuse
-from evaluation.build_evaluation_dataset import load_dataset
+from evaluation.build_evaluation_dataset import load_dataset, DATASET_PATH
 
-DATASET_PATH = "/Users/nadavsmacbookair/Desktop/Thesis/data/eval_dataset/limited-new-precomputed-qwen.parquet"
 from db.database import get_qdrant_client
 
 # Keyed by the meaningful choice (chunking level 1/2/3), not by the verbose
 # Qdrant collection name -- the collection names live only as values here.
 COLLECTIONS = {
     1: {
-        "coll_name":      "--limited --level 1 DENSE",
-        "coll_name_bm25": "--limited --level 1 BM25",
+        "coll_name":      "--PILOT --level 1 DENSE",
+        "coll_name_bm25": "--PILOT --level 1 BM25",
         "use_parent_fetch": False,
     },
     2: {
-        "coll_name":      "--limited --level 2 DENSE",
-        "coll_name_bm25": "--limited --level 2 BM25",
+        "coll_name":      "--PILOT --level 2 DENSE",
+        "coll_name_bm25": "--PILOT --level 2 BM25",
         "use_parent_fetch": True,
     },
     3: {
-        "coll_name":      "--limited --level 3 DENSE",
-        "coll_name_bm25": "--limited --level 3 BM25",
+        "coll_name":      "--PILOT --level 3 DENSE",
+        "coll_name_bm25": "--PILOT --level 3 BM25",
         "use_parent_fetch": True,
     },
 }
@@ -394,7 +393,7 @@ def write_config(
 
 if __name__ == "__main__":
     from mlx_lm import load
-
+    # tickers test: TSLA, PYPL, AAPL, JPM, NVDA
     # load parquet FinDER with enhanced queries.
     dataset, _ = load_dataset(DATASET_PATH)
     if dataset.empty:
@@ -403,13 +402,15 @@ if __name__ == "__main__":
     LEVELS = [1, 2, 3]
     configs = [
         #write_config(tickers=["pypl"], levels=LEVELS, retrieval_modes=["hybrid","sparse"], enhance_query_flag = [True, False], section_alpha = [0 ,1]),
-        write_config(tickers=["tsla"], levels=LEVELS, retrieval_modes=["hybrid","sparse"], enhance_query_flag = [True, False], section_alpha = [0 ,1]),
+        #write_config(tickers=["tsla"], levels=LEVELS, retrieval_modes=["hybrid","dense","sparse"], enhance_query_flag = [True, False], section_alpha = [0 ,1]),
+        write_config(tickers=["tsla"], levels=[1], retrieval_modes=["sparse"], enhance_query_flag = [False], section_alpha = [0]),
+    
     ]
     print(f"Running {len(configs)} configs...")
 
     print("Loading generation model...")
-    #gen_model, gen_tokenizer = load("mlx-community/Qwen3.5-9B-OptiQ-4bit")
-    gen_model, gen_tokenizer = None,None
+    gen_model, gen_tokenizer = load("mlx-community/Qwen3.5-9B-OptiQ-4bit")
+    #gen_model, gen_tokenizer = None,None
     for cfg in configs:
         run_multi_evaluation_lazy(
             configs=cfg,
