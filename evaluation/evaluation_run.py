@@ -43,10 +43,6 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).parent))
 from evaluation_functions import score_row
 
-# ── Config ────────────────────────────────────────────────────────────────────
-# disabled because we run in batches.
-# EVAL_FILE  = Path("/Users/nadavsmacbookair/Desktop/Thesis/data/eval_results/WMT_eval_20260626_1603.json")
-
 CHUNKS_DIR = Path("/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/chunks/hierarchical/indexed-at-07-07-26/header")
 
 FINGERPRINT_LEN       = 200    # chars of normalised text used as a fast exact-match key in fp_index
@@ -944,7 +940,7 @@ def _parse_judge_response(response: str) -> dict:
 
 def judge_llm_batch(
     items: list[tuple], model, tokenizer, max_tokens: int = 1000,
-    completion_batch_size: int = 3, prefill_batch_size: int = 1,
+    completion_batch_size: int = 6, prefill_batch_size: int = 2,
 ) -> list[dict]:
     """
     Batched version of judge_llm: judges a list of (question, truth_answer, rag_answer,
@@ -1004,11 +1000,28 @@ def judge_llm_batch(
     return results
 
 
-def _judge_unjudged_rows(rows_df: pd.DataFrame, judge_model, judge_tok) -> pd.DataFrame:
+JUDGE_CHECKPOINT_CHUNK = 20  # rows per judge_llm_batch call before an atomic checkpoint write
+
+
+def _checkpoint_df(df: pd.DataFrame, checkpoint_path: Path) -> None:
+    """Atomically write df to checkpoint_path (write-then-rename, mirrors run_rag_lazy's _checkpoint)."""
+    tmp_path = checkpoint_path.with_suffix(checkpoint_path.suffix + ".tmp")
+    df.to_pickle(tmp_path)
+    tmp_path.replace(checkpoint_path)
+
+
+def _judge_unjudged_rows(rows_df: pd.DataFrame, judge_model, judge_tok,
+                          checkpoint_path: Path | None = None) -> pd.DataFrame:
     """
     Judge every row that hasn't been judged yet, mutating rows_df in place. Rows
-    needing a real verdict are batched into one judge_llm_batch call instead of one
-    generate() call per row.
+    needing a real verdict are judged in chunks of JUDGE_CHECKPOINT_CHUNK via
+    judge_llm_batch (instead of one generate() call per row, or one giant call for
+    every unjudged row) so that a crash mid-run only loses at most one chunk's
+    worth of judging, not the whole pass.
+
+    If checkpoint_path is given, rows_df is atomically written to it (write-then-
+    rename, see _checkpoint_df) after every chunk — same crash-safety pattern as
+    run_rag_lazy.py's per-question _checkpoint().
 
     "Unjudged" = relevance is null. This makes judging resumable/idempotent: calling
     this twice on the same DataFrame (e.g. apply_llm_judge run again after an interrupted
@@ -1056,11 +1069,21 @@ def _judge_unjudged_rows(rows_df: pd.DataFrame, judge_model, judge_tok) -> pd.Da
             ))
 
     if batch_items:
-        print(f"  Batching {len(batch_items)} row(s) needing a real verdict into one call…")
-        results = judge_llm_batch(batch_items, judge_model, judge_tok)
-        for idx, scores in zip(batch_idxs, results):
-            for k, v in scores.items():
-                rows_df.at[idx, k] = v
+        n_chunks = math.ceil(len(batch_items) / JUDGE_CHECKPOINT_CHUNK)
+        print(f"  Judging {len(batch_items)} row(s) needing a real verdict in "
+              f"{n_chunks} chunk(s) of ≤{JUDGE_CHECKPOINT_CHUNK}…")
+        for c in range(n_chunks):
+            lo, hi = c * JUDGE_CHECKPOINT_CHUNK, (c + 1) * JUDGE_CHECKPOINT_CHUNK
+            chunk_idxs  = batch_idxs[lo:hi]
+            chunk_items = batch_items[lo:hi]
+            results = judge_llm_batch(chunk_items, judge_model, judge_tok)
+            for idx, scores in zip(chunk_idxs, results):
+                for k, v in scores.items():
+                    rows_df.at[idx, k] = v
+            if checkpoint_path is not None:
+                _checkpoint_df(rows_df, checkpoint_path)
+                print(f"    [checkpoint] {hi if hi < len(batch_items) else len(batch_items)}/"
+                      f"{len(batch_items)} judged → {checkpoint_path}")
 
     return rows_df
 
@@ -1068,7 +1091,8 @@ def _judge_unjudged_rows(rows_df: pd.DataFrame, judge_model, judge_tok) -> pd.Da
 _PENDING_DUP_COPY = "__pending_dup_copy__"
 
 
-def _judge_unjudged_rows_deduped(rows_df: pd.DataFrame, judge_model, judge_tok) -> pd.DataFrame:
+def _judge_unjudged_rows_deduped(rows_df: pd.DataFrame, judge_model, judge_tok,
+                                  checkpoint_path: Path | None = None) -> pd.DataFrame:
     """
     Same contract as _judge_unjudged_rows, but shares one verdict across rows whose
     retrieval is exactly identical for the same question (see _find_overlap_groups),
@@ -1121,7 +1145,7 @@ def _judge_unjudged_rows_deduped(rows_df: pd.DataFrame, judge_model, judge_tok) 
                 rows_df.at[m, "completeness"] = _PENDING_DUP_COPY
                 pending_placeholders.append(m)
 
-    rows_df = _judge_unjudged_rows(rows_df, judge_model, judge_tok)
+    rows_df = _judge_unjudged_rows(rows_df, judge_model, judge_tok, checkpoint_path=checkpoint_path)
 
     for g in eligible:
         canon = g["canonical_idx"]
@@ -1129,6 +1153,9 @@ def _judge_unjudged_rows_deduped(rows_df: pd.DataFrame, judge_model, judge_tok) 
             if m in pending_placeholders:
                 for col in ("relevance", "completeness", "judge_response"):
                     rows_df.at[m, col] = rows_df.at[canon, col]
+
+    if checkpoint_path is not None:
+        _checkpoint_df(rows_df, checkpoint_path)
 
     return rows_df
 
@@ -1434,14 +1461,16 @@ def run_multi_analysis(
 
     rows_df = pd.DataFrame(rows)
 
-    # ── LLM judge — optional, runs inline as part of the same pass ──────────────
-    if judge_model is not None:
-        rows_df = _judge_unjudged_rows_deduped(rows_df, judge_model, judge_tok)
-
     out_dir  = eval_path.parent / "analysis"
     out_xlsx = out_dir / eval_path.name.replace("eval_", "analysis_").replace(".json", ".xlsx")
     out_pkl  = out_xlsx.with_suffix(".pkl")
     out_pkl.parent.mkdir(parents=True, exist_ok=True)
+
+    # ── LLM judge — optional, runs inline as part of the same pass ──────────────
+    # checkpoint_path=out_pkl: judging writes to the same pickle atomically after
+    # every chunk, so a crash mid-judging loses at most one chunk, not the whole pass.
+    if judge_model is not None:
+        rows_df = _judge_unjudged_rows_deduped(rows_df, judge_model, judge_tok, checkpoint_path=out_pkl)
 
     rows_df.to_pickle(out_pkl)
     _write_multi_excel(rows_df, out_xlsx)
@@ -1463,7 +1492,7 @@ def apply_llm_judge(analysis_pkl: Path, judge_model, judge_tok) -> pd.DataFrame:
     """
     print(f"\nAnalysis pickle : {analysis_pkl}")
     rows_df = pd.read_pickle(analysis_pkl)
-    rows_df = _judge_unjudged_rows_deduped(rows_df, judge_model, judge_tok)
+    rows_df = _judge_unjudged_rows_deduped(rows_df, judge_model, judge_tok, checkpoint_path=analysis_pkl)
 
     rows_df.to_pickle(analysis_pkl)
     out_xlsx = analysis_pkl.with_suffix(".xlsx")
@@ -2056,7 +2085,7 @@ def main():
     USE_LLM_JUDGE = True
 
     eval_files = [
-        "/Users/nadavsmacbookair/Desktop/Thesis/data/eval_results/eval_multi_TSLA_20260708_1815.json",
+        "/Users/nadavsmacbookair/Desktop/Thesis/data/eval_results/ready_for_analysis/tsla_pypl-corr_nvda_aapl.json",
     ]
 
     print(f"Corpus dir: {CHUNKS_DIR}")
