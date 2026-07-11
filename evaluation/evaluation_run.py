@@ -65,7 +65,7 @@ def _numbers(text: str) -> set[str]:
     return set(_NUM_RE.findall(text))
 
 
-SOFT_RELEVANCE_THRESH = 0.30  # minimum overlap score to label a chunk as soft-relevant
+SOFT_RELEVANCE_THRESH = 0.50  # minimum overlap score to label a chunk as soft-relevant
 
 
 def chunk_relevance(chunk_text: str, truth_passages: list[str]) -> float:
@@ -1992,8 +1992,6 @@ def _write_section_routing_sheet(df: pd.DataFrame, writer: "pd.ExcelWriter") -> 
             n = len(sub_sec)
             rec[f"n_{sec}"]   = n
             rec[f"pct_{sec}"] = round(n / n_total * 100, 1) if n_total else None
-            evi = pd.to_numeric(sub_sec["evidence_hit"], errors="coerce").mean()
-            rec[f"evi_{sec}"] = round(float(evi), 3) if pd.notna(evi) else None
             if "soft_MRR" in df.columns:
                 mrr = pd.to_numeric(sub_sec["soft_MRR"], errors="coerce").mean()
                 rec[f"mrr_{sec}"] = round(float(mrr), 3) if pd.notna(mrr) else None
@@ -2009,7 +2007,7 @@ def _write_section_routing_sheet(df: pd.DataFrame, writer: "pd.ExcelWriter") -> 
             pd.to_numeric(df["section_alpha"], errors="coerce").dropna().unique()
         )
         if len(alphas) >= 2:
-            present = [(col, lbl) for col, lbl in _AX_CAT_METRICS if col in df.columns]
+            present = [(col, lbl) for col, lbl in _AX_CAT_METRICS if col in df.columns and col != "evidence_hit"]
             p2_rows: list[dict] = []
 
             for cat in list(categories) + ["OVERALL"]:
@@ -2103,13 +2101,15 @@ def main():
     """
     One-click pipeline. Analyses every file in eval_files in one pass each:
     retrieval analysis + lexical judge always run; set USE_LLM_JUDGE=True to also
-    run the LLM judge (judge_llm, via JUDGE_PROMPT) inline, in the same pass, for
+    run the LLM judge (judge_llm, via ) inline, in the same pass, for
     every file.
     """
+    #print("Experimental run with coverage = 0.60 instead of .30")
     USE_LLM_JUDGE = True
 
     eval_files = [
         "/Users/nadavsmacbookair/Desktop/Thesis/data/eval_results/ready_for_analysis/eval_multi_JPM-KO-WMT_merged.json",
+        #/Users/nadavsmacbookair/Desktop/Thesis/data/eval_results/ready_for_analysis/tsla_pypl-corr_nvda_aapl-no-bad-q.json",
     ]
 
     print(f"Corpus dir: {CHUNKS_DIR}")
