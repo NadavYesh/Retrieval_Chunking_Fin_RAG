@@ -10,17 +10,6 @@ RAG_ANSWER_PROMPT = '''
         '''
 
 
-META_EXTRACT_PROMPT = """
-    You are a financial analysis expert specializing in SEC 10-K filings. Your task is to rewrite a user's natural language request into a high-density financial search query.
-
-    ### Instructions:
-    Rewrite the user's request into a high-density financial query. Use professional terminology like 'amortization', 'revenue recognition', 'liquidity risk', 'EBITDA', 'segment reporting', and 'capital expenditures' to help a vector database find the most relevant chunks of text.
-
-    Return ONLY a valid JSON object of the form:
-    {"optimized_prompt": "..."}
-"""
-
-
 QUERY_ENHANCEMENT_PROMPT = """\
           You are a mechanical text-transformation engine for a document retrieval system. \
           You expand short financial queries into richer search strings. \
@@ -117,6 +106,4 @@ After your brief rationale (2–4 sentences), output your decisions strictly in 
 {answer_b}</Assistant_B_Answer>
 
 You are reminded to output your decisions strictly in JSON format: {{"relevance": <A/B>, "completeness": <A/B>}}
-
-
 """

@@ -142,7 +142,7 @@ def run_multi_evaluation_lazy(
     # Resume support: skip already-completed questions (0-indexed) for tickers whose
     # prior run was interrupted mid-way -- e.g. {"tsla": 5} resumes tsla at question 5
     # (i.e. questions[5:]) while every other ticker still runs from question 0.
-    RESUME_FROM = {"tsla": 5}
+    RESUME_FROM = {"ko": 3}
 
     ticker_groups: dict[tuple, list[tuple[int, dict]]] = defaultdict(list)
     for i, cfg in enumerate(configs):
@@ -370,7 +370,7 @@ def run_multi_evaluation_lazy(
                 print(f"      [gen] batching {len(batch_items)} unique retrieval(s) for this question "
                       f"in one call ({len(group_keys)} configs total)")
                 try:
-                    batch_results = generate_llm_answers_batch(batch_items, gen_model, gen_tokenizer)
+                    batch_results = generate_llm_answers_batch(batch_items, gen_model, gen_tokenizer, completion_batch_size=1,prefill_batch_size=1)
                     for retrieval_key, (answer, _) in zip(batch_keys, batch_results):
                         n_shared = len(overlap_groups[retrieval_key])
                         shared_note = f" ({n_shared} configs share this)" if n_shared > 1 else ""
@@ -470,7 +470,7 @@ def write_config(
 
 if __name__ == "__main__":
     from mlx_lm import load
-    # tickers test: TSLA, PYPL, AAPL, JPM, NVDA
+    # tickers test: "ko","wmt","jpm"
     # load parquet FinDER with enhanced queries.
     dataset, _ = load_dataset(DATASET_PATH)
     if dataset.empty:
@@ -481,7 +481,8 @@ if __name__ == "__main__":
         #write_config(tickers=["pypl"], levels=LEVELS, retrieval_modes=["hybrid","sparse"], enhance_query_flag = [True, False], section_alpha = [0 ,1]),
         #write_config(tickers=["tsla"], levels=LEVELS, retrieval_modes=["hybrid","dense","sparse"], enhance_query_flag = [True, False], section_alpha = [0 ,1]),
         # write_config(tickers=["tsla"], levels=[1], retrieval_modes=["sparse"], enhance_query_flag = [False], section_alpha = [0,1]),
-        write_config(tickers=["tsla","pypl","aapl","nvda"], levels=LEVELS, retrieval_modes=["sparse","dense","hybrid"], enhance_query_flag = [True,False], section_alpha = [0,1]),
+        # write_config(tickers=["tsla","pypl","aapl","nvda"], levels=LEVELS, retrieval_modes=["sparse","dense","hybrid"], enhance_query_flag = [True,False], section_alpha = [0,1]),
+        write_config(tickers=["ko","wmt","jpm"], levels=LEVELS, retrieval_modes=["sparse","dense","hybrid"], enhance_query_flag = [True,False], section_alpha = [0,1]),
     
     ]
     print(f"Running {len(configs)} configs...")

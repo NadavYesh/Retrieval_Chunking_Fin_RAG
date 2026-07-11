@@ -75,6 +75,14 @@ def chunk_relevance(chunk_text: str, truth_passages: list[str]) -> float:
     Score = max over truth passages of max(num_overlap, text_similarity) where:
       num_overlap = |chunk_nums ∩ truth_nums| / |truth_nums|  (truth coverage direction)
       text_similarity = SequenceMatcher ratio on first 500 chars
+
+    A graded score, not an exact chunk-ID match, on purpose: FinDER's evidence text
+    sometimes marks an omitted continuation with a literal "<text>...<text>" placeholder,
+    which has no corresponding span in the source filing to match against, and the corpus
+    spans multiple fiscal years, so a retrieved chunk can be genuinely relevant evidence
+    without being the specific passage FinDER happens to cite. Both make a strict
+    one-to-one truth-chunk match impractical (see thesis, Experimental Setup
+    Section~sec:retrieval-metrics).
     """
     chunk_nums = _numbers(chunk_text)
     best = 0.0
@@ -106,6 +114,13 @@ def soft_retrieval_metrics(
     """
     Compute soft retrieval metrics using per-chunk relevance scoring.
     Available for ALL rows (no corpus lookup dependency).
+
+    soft_MRR and soft_Recall@k are the standard, non-graded MRR and Recall@k
+    formulas (reciprocal rank of the first hit; any hit in the top k) — the only
+    thing that is "soft" is the relevance label feeding them: each retrieved chunk
+    ID is resolved to text via corpus_text_map, scored against truth_refs by
+    chunk_relevance(), and thresholded at SOFT_RELEVANCE_THRESH to a binary
+    relevant/not-relevant label before MRR/Recall@k are applied as usual.
     """
     rel_scores = [
         chunk_relevance(corpus_text_map.get(cid, ""), truth_refs)
@@ -894,7 +909,10 @@ def judge_llm(question: str, truth_answer: str, rag_answer: str, baseline_answer
     them in "A=rag_answer, B=baseline_answer" terms regardless of prompt order.
 
     Returns relevance, completeness ("A"/"B" strings — which answer won),
-    and judge_response (full raw model output for inspection).
+    judge_response (full raw model output for inspection), and swapped (bool —
+    whether rag_answer/baseline_answer were swapped into slots A/B for this call,
+    kept so judge_response's literal A/B can be reconciled with the unswapped
+    relevance/completeness values during manual QA).
     """
     sys.path.append(str(Path(__file__).resolve().parent.parent))
     from prompts import JUDGE_PROMPT
@@ -915,6 +933,7 @@ def judge_llm(question: str, truth_answer: str, rag_answer: str, baseline_answer
     if swapped:
         result["relevance"]    = _unswap_verdict(result["relevance"])
         result["completeness"] = _unswap_verdict(result["completeness"])
+    result["swapped"] = swapped
     return result
 
 
@@ -939,8 +958,8 @@ def _parse_judge_response(response: str) -> dict:
 
 
 def judge_llm_batch(
-    items: list[tuple], model, tokenizer, max_tokens: int = 1000,
-    completion_batch_size: int = 6, prefill_batch_size: int = 2,
+    items: list[tuple], model, tokenizer, max_tokens: int = 1200,
+    completion_batch_size: int = 1, prefill_batch_size: int = 1,
 ) -> list[dict]:
     """
     Batched version of judge_llm: judges a list of (question, truth_answer, rag_answer,
@@ -959,7 +978,8 @@ def judge_llm_batch(
     result is flipped back to "A=rag_answer, B=baseline_answer" terms before return.
 
     Returns a list of score-dicts (same shape as judge_llm's return: relevance,
-    completeness, judge_response), one per item, in the same order as `items`.
+    completeness, judge_response, swapped), one per item, in the same order as
+    `items`.
     """
     sys.path.append(str(Path(__file__).resolve().parent.parent))
     from prompts import JUDGE_PROMPT
@@ -997,6 +1017,7 @@ def judge_llm_batch(
         if swapped:
             result["relevance"]    = _unswap_verdict(result["relevance"])
             result["completeness"] = _unswap_verdict(result["completeness"])
+        result["swapped"] = swapped
     return results
 
 
@@ -1039,8 +1060,11 @@ def _judge_unjudged_rows(rows_df: pd.DataFrame, judge_model, judge_tok,
         )
 
     # Creation order fixes column order in the DataFrame: judge_response, relevance,
-    # completeness — appended right after baseline_answer.
-    for col in ("judge_response", "relevance", "completeness"):
+    # completeness, swapped — appended right after baseline_answer. swapped records
+    # whether rag_answer/baseline_answer were swapped into prompt slots A/B for that
+    # row's judge call, so judge_response's literal A/B can be reconciled with the
+    # (already unswapped) relevance/completeness during manual QA.
+    for col in ("judge_response", "relevance", "completeness", "swapped"):
         if col not in rows_df.columns:
             rows_df[col] = None
 
@@ -1123,7 +1147,7 @@ def _judge_unjudged_rows_deduped(rows_df: pd.DataFrame, judge_model, judge_tok,
     # Ensure the judge columns exist before writing to them — mirrors the same
     # column-creation _judge_unjudged_rows does internally, needed here because we
     # may pre-populate sentinels/placeholders before that function ever runs.
-    for col in ("judge_response", "relevance", "completeness"):
+    for col in ("judge_response", "relevance", "completeness", "swapped"):
         if col not in rows_df.columns:
             rows_df[col] = None
 
@@ -1151,7 +1175,7 @@ def _judge_unjudged_rows_deduped(rows_df: pd.DataFrame, judge_model, judge_tok,
         canon = g["canonical_idx"]
         for m in g["member_idxs"]:
             if m in pending_placeholders:
-                for col in ("relevance", "completeness", "judge_response"):
+                for col in ("relevance", "completeness", "judge_response", "swapped"):
                     rows_df.at[m, col] = rows_df.at[canon, col]
 
     if checkpoint_path is not None:
@@ -2085,7 +2109,7 @@ def main():
     USE_LLM_JUDGE = True
 
     eval_files = [
-        "/Users/nadavsmacbookair/Desktop/Thesis/data/eval_results/ready_for_analysis/tsla_pypl-corr_nvda_aapl.json",
+        "/Users/nadavsmacbookair/Desktop/Thesis/data/eval_results/ready_for_analysis/eval_multi_JPM-KO-WMT_merged.json",
     ]
 
     print(f"Corpus dir: {CHUNKS_DIR}")

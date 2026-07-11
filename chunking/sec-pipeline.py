@@ -122,9 +122,31 @@ def build_child_level(
     return child_df
 
 
+MIN_TOKENS_FOR_ENRICHMENT = 20
+ENRICH_BATCH = 16  # chunks per batched forward pass
+
+
+def _encode_for_batch(tokenizer, prompt_text: str) -> list:
+    """Tokenize a chat-templated prompt string the same way mlx_lm.generate does
+    internally (stream_generate), so batched and single-item generation see
+    identical token inputs for the identical prompt text."""
+    add_special = tokenizer.bos_token is None or not prompt_text.startswith(tokenizer.bos_token)
+    return tokenizer.encode(prompt_text, add_special_tokens=add_special)
+
+
+def _parse_summary(desc: str) -> str:
+    """The prompt asks Llama to wrap its output in <summary> tags."""
+    import re
+    match = re.search(r'<summary>(.*?)</summary>', desc.strip(), re.DOTALL)
+    return match.group(1).strip() if match else desc
+
+
 def build_enriched_level(
     child_df: pd.DataFrame,
     caption_=None,
+    batch_size: int = ENRICH_BATCH,
+    completion_batch_size: int = 2,
+    prefill_batch_size: int = 1,
 ) -> pd.DataFrame:
     """
     Level 3 — child chunks augmented with an LLM-generated description.
@@ -133,57 +155,66 @@ def build_enriched_level(
     nature of any tables, reducing embedding-model dependence on tabular layout.
     At ingest time, embed 'description' instead of 'text'.
 
+    Chunks are enriched `batch_size` at a time in a single batched forward pass
+    (mlx_lm.batch_generate) rather than one generate() call per chunk, so the GPU
+    processes many prompts at once instead of serializing them.
+
     Args:
         child_df: Output of build_child_level.
         caption_:     Optional pre-loaded (model, tokenizer) tuple from mlx_lm.load().
                   Pass it when processing multiple files to avoid reloading per file.
                   If None, the model is loaded automatically.
+        batch_size: how many chunks are sent per batch_generate call.
+        completion_batch_size/prefill_batch_size: forwarded to mlx_lm's
+                  BatchGenerator (defaults 32/8). They cap how many sequences'
+                  KV caches are held concurrently — lower them if enrichment OOMs.
 
     Returns:
         enriched_df: copy of child_df with a top-level 'description' column
                      and 'description' injected into each row's metadata dict.
     """
-    from mlx_lm import load, generate as mlx_generate
-    import re
-    if caption_ is  None:
+    from mlx_lm import load, batch_generate
+    if caption_ is None:
         print("Loading Llama for chunk enrichment...")
         model, tokenizer = load("mlx-community/Llama-3.2-3B-Instruct-4bit")
-    # else:
-    #     model, tokenizer = caption_
+    else:
+        model, tokenizer = caption_
 
-    n = len(child_df)
-    descriptions = []
-    MIN_TOKENS_FOR_ENRICHMENT = 20
+    texts = list(child_df["text"])
+    n = len(texts)
+    descriptions: list[str] = [""] * n
 
-    for i, (_, row) in enumerate(child_df.iterrows()):
-        text = row["text"]
-        # Chunks this short (e.g. "<!-- header-only -->" placeholders) give the
-        # model nothing to summarize. Asked to produce a summary regardless, it
-        # fabricates one by pattern-matching the prompt's own example instead of
-        # the (empty) input. Skip the LLM call; leave description empty rather
-        # than duplicating text (ingest embeds `description + text` verbatim).
-        if len(tokenizer.encode(text)) < MIN_TOKENS_FOR_ENRICHMENT:
-            descriptions.append("")
-            if (i + 1) % 20 == 0 or (i + 1) == n:
-                print(f"  Enriched {i + 1}/{n} chunks")
-            continue
+    # Chunks this short (e.g. "<!-- header-only -->" placeholders) give the
+    # model nothing to summarize. Asked to produce a summary regardless, it
+    # fabricates one by pattern-matching the prompt's own example instead of
+    # the (empty) input. Skip the LLM call; leave description empty rather
+    # than duplicating text (ingest embeds `description + text` verbatim).
+    todo = [i for i, t in enumerate(texts)
+            if len(tokenizer.encode(t)) >= MIN_TOKENS_FOR_ENRICHMENT]
+    print(f"  Enriching {len(todo)}/{n} chunks ({n - len(todo)} too short to summarize)")
 
-        messages = [
-            {"role": "system", "content": ENRICH_CHUNKS_PROMPT},
-            {"role": "user",   "content": text},
-        ]
-        prompt = tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
+    for lo in range(0, len(todo), batch_size):
+        idxs = todo[lo:lo + batch_size]
+        prompts = []
+        for i in idxs:
+            messages = [
+                {"role": "system", "content": ENRICH_CHUNKS_PROMPT},
+                {"role": "user",   "content": texts[i]},
+            ]
+            prompts.append(tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            ))
+
+        batch = batch_generate(
+            model, tokenizer,
+            [_encode_for_batch(tokenizer, p) for p in prompts],
+            max_tokens=150, verbose=False,
+            completion_batch_size=completion_batch_size,
+            prefill_batch_size=prefill_batch_size,
         )
-        desc = mlx_generate(model, tokenizer, prompt=prompt, max_tokens=150, verbose=False)
-        # the prompt asks Llama to return <summary> tags
-        match = re.search(r'<summary>(.*?)</summary>',desc.strip())
-        if match:
-            result = match.group(1)
-            desc = result.strip()  # Output: target text
-        descriptions.append(desc)
-        if (i + 1) % 20 == 0 or (i + 1) == n:
-            print(f"  Enriched {i + 1}/{n} chunks")
+        for i, desc in zip(idxs, batch.texts):
+            descriptions[i] = _parse_summary(desc)
+        print(f"  Enriched {min(lo + batch_size, len(todo))}/{len(todo)} chunks")
 
     enriched_df = child_df.copy()
     enriched_df["description"] = descriptions
@@ -264,7 +295,7 @@ def sec_chunking_pipeline_hierarchical(
 # ─────────────────────────────────────────────────────────────────────────────
 #%%
 if __name__ == "__main__":
-    RAW_DIR  = '/Users/nadavsmacbookair/Desktop/Thesis/data/html/indexed at 07-07-26/batch_5'
+    RAW_DIR  = '/Users/nadavsmacbookair/Desktop/Thesis/data/html/indexed at 07-07-26/batch_10'
     RAW_FILES = [f for f in os.listdir(RAW_DIR) if f.endswith(".html")]
 
     BUDGET = 200

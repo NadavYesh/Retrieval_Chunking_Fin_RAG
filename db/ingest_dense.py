@@ -122,7 +122,6 @@ def upsert_data(chunk_paths, coll_name_dense, level_3_enriched=False):
     embed_model, embed_tokenizer = emb_load("mlx-community/embeddinggemma-300m-bf16")
 
     upsert_batch = 42
-    encode_batch = 6
 
     print("Starting upserting loop...")
 
