@@ -41,22 +41,7 @@ def year_weights(years: list[int]) -> list[tuple[int, float]]:
     return [(yr, r / total) for yr, r in zip(sorted_years, raw)]
 
 
-# ── Deterministic fiscal-year extraction ──────────────────────────────────────
-# Two kinds of signal, both read directly off the raw query text (no LLM):
-#   1. Explicit numeric years/ranges ("FY24", "2022-2024", "2022/21") -- these
-#      are unambiguous, so a query that states them is respected as-is with a
-#      flat, unweighted filter across exactly those years.
-#   2. Qualified relative phrases ("current fiscal year", "last year",
-#      "year-over-year") -- specific multi-word phrases that essentially never
-#      appear with a non-temporal meaning in financial text.
-# Deliberately NOT included: bare single-word anchors ("current", "recent",
-# "latest", "historical"). Those collide with standard accounting terminology
-# that has nothing to do with fiscal year -- "current ratio", "current
-# liabilities", "historical cost accounting" -- which is a word-sense-
-# disambiguation problem no keyword match can solve safely. A query with only
-# one of those bare words and nothing else falls through to None (which then
-# triggers the default 5-year decayed window at retrieval time), rather than
-# risking a wrong guess.
+
 FINDER_PRIOR_YEAR = FINDER_ANCHOR_YEAR - 1
 
 _RELATIVE_YEAR_MAP = {
@@ -209,39 +194,11 @@ def _normalize_company_name(name: str) -> str:
     return n
 
 
-# Hand-curated aliases for colloquial/brand names that diverge from the legal
-# entity name. Deliberately curated by hand rather than auto-derived: an
-# earlier prototype auto-derived single "distinctive" words out of company
-# names (e.g. "Ford" from "Ford Motor") and it pulled in plain English words
-# that only happen to be unique *within the S&P 500 name list* -- e.g. "real"
-# (Alexandria Real Estate -> ARE), "state" (State Street -> STT), "water"
-# (American Water Works -> AWK), "union" (Union Pacific -> UNP), "take"
-# (Take-Two -> TTWO), "price" (T. Rowe Price -> TROW). Those are exactly the
-# kind of generic terms that show up constantly in 10-K financial text ("real
-# estate", "state tax", "union risk", "take rate", "price of raw materials"),
-# so auto-derivation would inject false-positive tickers more often than the
-# LLM hallucinated them. Hand-curating avoids that.
-_MANUAL_TICKER_ALIASES = {
-    "google": "GOOGL",
-    "alphabet": "GOOGL",
-    "facebook": "META",
-    "meta": "META",
-    "amazon": "AMZN",
-    "ford": "F",
-    "jpmorgan": "JPM",
-    "jp morgan": "JPM",
-    "berkshire": "BRK-B",
-    "berkshire hathaway": "BRK-B",
-    "att": "T",
-    "at t": "T",
-}
-
-_NOT_TICKERS = {"FOR", "THE", "AND", "INC", "LLC", "SEC", "FY", "US", "AT", "EPS", "GAAP"}
+_NOT_TICKERS = {"FOR", "THE", "AND", "INC", "LLC", "SEC", "FY", "US", "AT", "EPS", "GAAP", "INC", ".com", "plc",}
 
 _ticker_alias_to_symbol: dict[str, str] | None = None
 _ticker_alias_patterns: list[tuple[str, re.Pattern]] | None = None
 _known_tickers: set[str] | None = None
-
 
 def _load_ticker_tables():
     """Lazily build the alias/pattern tables from the SP500 CSV snapshot, once."""
@@ -257,16 +214,33 @@ def _load_ticker_tables():
         )
     df = pd.read_csv(SP500_CSV_PATH)
 
-    alias_to_symbol: dict[str, str] = {}
+    # Full normalized names (e.g. "charles schwab") are safe aliases, but
+    # people rarely type the full name -- "schwab", not "charles schwab
+    # corporation". To catch that without a hand-curated ticker->nickname
+    # table, also alias each individual word of the normalized name, but
+    # only if that word is distinctive to exactly one company across the
+    # whole S&P 500 list (auto-derived uniqueness, not per-company
+    # guesswork). That's why generic corporate words shared across many
+    # names ("financial", "group", "national", "american"...) never
+    # qualify as single-word aliases -- they're never unique to one ticker.
+    entries: list[tuple[str, str]] = []
+    word_to_tickers: dict[str, set] = {}
     for _, row in df.iterrows():
         ticker = row["Symbol"]
         for raw_name in (row["Shortname"], row["Longname"]):
-            alias = _normalize_company_name(str(raw_name))
-            if alias and alias not in alias_to_symbol:
-                alias_to_symbol[alias] = ticker  # first occurrence = higher index weight
+            norm = _normalize_company_name(str(raw_name))
+            if not norm:
+                continue
+            entries.append((ticker, norm))
+            for word in set(norm.split()):
+                word_to_tickers.setdefault(word, set()).add(ticker)
 
-    for alias, ticker in _MANUAL_TICKER_ALIASES.items():
-        alias_to_symbol[alias] = ticker  # manual aliases win over auto-derived
+    alias_to_symbol: dict[str, str] = {}
+    for ticker, norm in entries:
+        alias_to_symbol.setdefault(norm, ticker)  # first occurrence = higher index weight
+        for word in norm.split():
+            if len(word) >= 4 and len(word_to_tickers[word]) == 1:
+                alias_to_symbol.setdefault(word, ticker)
 
     _ticker_alias_to_symbol = alias_to_symbol
     _known_tickers = set(df["Symbol"].str.upper())
@@ -275,7 +249,6 @@ def _load_ticker_tables():
         (alias, re.compile(r"\b" + re.escape(alias) + r"\b"))
         for alias in sorted(alias_to_symbol, key=len, reverse=True)
     ]
-
 
 def extract_ticker_hint(query: str):
     """
@@ -316,39 +289,15 @@ def extract_ticker_deterministic(query: str):
     if m and m.group(1) in _known_tickers:
         return m.group(1).lower()
 
+    # if ticker is found, return it.
     for tok in re.findall(r'\b[A-Z]{2,5}(?:-[A-Z])?\b', query):
         if tok in _known_tickers and tok not in _NOT_TICKERS:
             return tok.lower()
 
+    # if no ticker found, look for a company name (full or single distinctive word).
     norm_query = _normalize_company_name(query)
     for alias, pattern in _ticker_alias_patterns:
         if pattern.search(norm_query):
             return _ticker_alias_to_symbol[alias].lower()
-
     return extract_ticker_hint(query)
-
-
-# ── LLM response parsing ──────────────────────────────────────────────────────
-METADATA_FALLBACK = {"optimized_query": None}
-
-
-def parse_metadata_response(response: str, fallback_query: str) -> dict:
-    """
-    Extract the optimized-query rewrite from an LLM response that should
-    contain a JSON object with an "optimized_prompt" field. ticker/year/
-    form_type are no longer sourced from the LLM (see
-    extract_ticker_deterministic / extract_year_deterministic in this module
-    and the hardcoded form_type in evaluation/rag_functions.py) -- this
-    function's only remaining job is the query rewrite.
-
-    Falls back to the original query on any parse failure.
-    """
-    try:
-        match = re.search(r'\{.*\}', response, re.DOTALL)
-        if not match:
-            return {"optimized_query": fallback_query}
-        data = json.loads(match.group())
-        return {"optimized_query": data.get("optimized_prompt", fallback_query)}
-    except Exception as e:
-        print(f"  [parse_metadata] WARNING: {e}; using original query")
-        return {"optimized_query": fallback_query}
+print(extract_ticker_deterministic("nadav likes to drive tesla a microsoft COST in 2022-2024"))

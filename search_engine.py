@@ -7,7 +7,7 @@ from datetime import datetime
 from mlx_lm import load, generate
 from db.database import get_qdrant_client
 from prompts import RAG_ANSWER_PROMPT
-from utils import parse_metadata_response, year_weights, _default_year_window
+from utils import year_weights, _default_year_window
 
 
 
