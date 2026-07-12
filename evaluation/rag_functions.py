@@ -7,8 +7,8 @@ sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 import mlx.core as mx
 from mlx_lm import generate
-from prompts import META_EXTRACT_PROMPT, QUERY_ENHANCEMENT_PROMPT
-from utils import parse_metadata_response, extract_ticker_deterministic, extract_year_deterministic
+from prompts import QUERY_ENHANCEMENT_PROMPT
+from utils import extract_ticker_deterministic, extract_year_deterministic
 
 MAX_ENHANCE_RETRIES = 3
 
@@ -152,8 +152,9 @@ def enhance_query_batch(
 
 
 def extract_metadata_batch(
-    queries: list[str], model, tokenizer,
-    completion_batch_size: int = 3, prefill_batch_size: int = 1,
+    queries: list[str]
+    #model, tokenizer,
+    #completion_batch_size: int = 3, prefill_batch_size: int = 1,
 ) -> list[dict]:
     """
     Batched version of extract_metadata. As in the single-query path, only the
@@ -162,23 +163,17 @@ def extract_metadata_batch(
     in input order.
     """
     if not queries:
-        return []
-
-    prompts = [_chat_prompt(tokenizer, META_EXTRACT_PROMPT, q) for q in queries]
-    # max_tokens matches mlx_lm.generate's own default (256), which the
-    # single-query extract_metadata relies on by omitting the argument.
-    texts = _batch_generate_texts(
-        model, tokenizer, prompts, 256, completion_batch_size, prefill_batch_size,
-    )
-
+         return []
     metas = []
-    for query, response in zip(queries, texts):
-        meta = parse_metadata_response(response, fallback_query=query)
+    for query in queries:
+        meta = {}
         meta["ticker"]    = extract_ticker_deterministic(query)
         meta["year"]      = extract_year_deterministic(query)
         meta["form_type"] = "10-k"
         metas.append(meta)
+
     return metas
+print(extract_metadata_batch(["nadav likes a really nice computer made by apple"]))
 
 
 def embed_query_batch(queries: list[str], embed_model, embed_tokenizer) -> list[list[float]]:
@@ -199,29 +194,29 @@ def embed_query_batch(queries: list[str], embed_model, embed_tokenizer) -> list[
     return outputs.text_embeds.tolist()
 
 
-def extract_metadata(query: str, model, tokenizer) -> dict:
-    """
-    ticker/year/form_type are resolved deterministically (no LLM, no
-    hallucination risk); the LLM call below produces only the
-    optimized_query rewrite used for vector search.
-    """
-    messages = [
-        {"role": "system", "content": META_EXTRACT_PROMPT},
-        {"role": "user",   "content": query},
-    ]
-    prompt   = tokenizer.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True, enable_thinking=False
-    )
-    response = generate(model, tokenizer, prompt=prompt, verbose=False)
-    gc.collect()
-    mx.clear_cache()
+# def extract_metadata(query: str, model, tokenizer) -> dict:
+#     """
+#     ticker/year/form_type are resolved deterministically (no LLM, no
+#     hallucination risk); the LLM call below produces only the
+#     optimized_query rewrite used for vector search.
+#     """
+#     messages = [
+#         {"role": "system", "content": META_EXTRACT_PROMPT},
+#         {"role": "user",   "content": query},
+#     ]
+#     prompt   = tokenizer.apply_chat_template(
+#         messages, tokenize=False, add_generation_prompt=True, enable_thinking=False
+#     )
+#     response = generate(model, tokenizer, prompt=prompt, verbose=False)
+#     gc.collect()
+#     mx.clear_cache()
 
-    meta = parse_metadata_response(response, fallback_query=query)
-    meta["ticker"]    = extract_ticker_deterministic(query)
-    meta["year"]      = extract_year_deterministic(query)
-    meta["form_type"] = "10-k"
+#     meta = parse_metadata_response(response, fallback_query=query)
+#     meta["ticker"]    = extract_ticker_deterministic(query)
+#     meta["year"]      = extract_year_deterministic(query)
+#     meta["form_type"] = "10-k"
 
-    return meta
+#     return meta
 
 
 def embed_query(query: str, embed_model, embed_tokenizer) -> list[float]:
