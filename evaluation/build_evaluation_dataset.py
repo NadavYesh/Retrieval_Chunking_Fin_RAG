@@ -74,6 +74,7 @@ def build_dataset(
 
     for ticker in tickers:
         finder_df = run_finder(tickers=[ticker])
+        finder_df = finder_df[:finder_df.shape[0]-1]
         if finder_df.empty:
             print(f"[skip] no FinDER questions for {ticker}")
             continue
@@ -90,22 +91,11 @@ def build_dataset(
             print(f"\n  [chunk {c_idx+1}/{n_chunks}] {len(chunk)} question(s), rows {lo+1}-{lo+len(chunk)}")
 
             # 1. Query enhancement — one batched forward pass for the whole chunk
-            enhanced_list = enhance_query_batch(queries, gen_model, gen_tokenizer, completion_batch_size=1, prefill_batch_size=1)
+            enhanced_list = enhance_query_batch(queries, gen_model, gen_tokenizer, completion_batch_size=1, prefill_batch_size=2)
 
             # 2. Metadata extraction -- always from the original query. Ticker/
-            # year/form_type must never depend on query enhancement, so
-            # enhancement's effect stays isolated to retrieval (embedding +
-            # BM25 text) rather than cascading into the metadata filters.
-            metas = extract_metadata_batch(queries, gen_model, gen_tokenizer)
+            metas = extract_metadata_batch(queries)
 
-            # This row is specifically being evaluated against `ticker`'s 10-K
-            # (that's why run_finder was called with it) -- for multi-company
-            # comparison queries (e.g. "EA's ... impacts AAPL/GOOGL"), the
-            # deterministic extractor may correctly find a *different* ticker
-            # mentioned in the text. For evaluation rows the bucket ticker is
-            # authoritative: retrieval must target the company this row was
-            # built for, not whichever company happens to be extracted from
-            # the raw text.
             for meta_orig in metas:
                 if meta_orig.get("ticker") != ticker:
                     print(f"  [ticker override] extracted={meta_orig.get('ticker')!r} -> bucket {ticker!r}")
@@ -174,7 +164,7 @@ if __name__ == "__main__":
     from mlx_lm import load
     from mlx_embeddings.utils import load as emb_load
 
-    tickers = ['ko','coca cola','coca-cola','cocacola']
+    tickers = ["mdlz","mondelez","ma","mastercard","yum","nem","newmont","iff"]
 
     print("Loading generation model...")
     gen_model, gen_tokenizer = load("mlx-community/Qwen3.5-9B-OptiQ-4bit")

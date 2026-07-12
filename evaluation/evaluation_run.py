@@ -65,7 +65,7 @@ def _numbers(text: str) -> set[str]:
     return set(_NUM_RE.findall(text))
 
 
-SOFT_RELEVANCE_THRESH = 0.50  # minimum overlap score to label a chunk as soft-relevant
+SOFT_RELEVANCE_THRESH = 0.30  # minimum overlap score to label a chunk as soft-relevant
 
 
 def chunk_relevance(chunk_text: str, truth_passages: list[str]) -> float:
@@ -959,7 +959,7 @@ def _parse_judge_response(response: str) -> dict:
 
 def judge_llm_batch(
     items: list[tuple], model, tokenizer, max_tokens: int = 1200,
-    completion_batch_size: int = 1, prefill_batch_size: int = 1,
+    completion_batch_size: int = 1, prefill_batch_size: int = 2,
 ) -> list[dict]:
     """
     Batched version of judge_llm: judges a list of (question, truth_answer, rag_answer,
@@ -2108,8 +2108,8 @@ def main():
     USE_LLM_JUDGE = True
 
     eval_files = [
-        "/Users/nadavsmacbookair/Desktop/Thesis/data/eval_results/ready_for_analysis/eval_multi_JPM-KO-WMT_merged.json",
-        #/Users/nadavsmacbookair/Desktop/Thesis/data/eval_results/ready_for_analysis/tsla_pypl-corr_nvda_aapl-no-bad-q.json",
+        "/Users/nadavsmacbookair/Desktop/Thesis/data/eval_results/ready_for_analysis/eval_multi_mdlz_ma_yum_newmont_iff.json",
+        
     ]
 
     print(f"Corpus dir: {CHUNKS_DIR}")

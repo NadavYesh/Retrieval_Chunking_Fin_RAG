@@ -146,7 +146,7 @@ def build_enriched_level(
     caption_=None,
     batch_size: int = ENRICH_BATCH,
     completion_batch_size: int = 2,
-    prefill_batch_size: int = 1,
+    prefill_batch_size: int = 2, # prefill always lower, it comes before
 ) -> pd.DataFrame:
     """
     Level 3 — child chunks augmented with an LLM-generated description.
@@ -207,8 +207,8 @@ def build_enriched_level(
 
         batch = batch_generate(
             model, tokenizer,
-            [_encode_for_batch(tokenizer, p) for p in prompts],
-            max_tokens=150, verbose=False,
+            prompts=[_encode_for_batch(tokenizer, p) for p in prompts],
+            max_tokens=150, verbose=True,
             completion_batch_size=completion_batch_size,
             prefill_batch_size=prefill_batch_size,
         )
@@ -295,7 +295,7 @@ def sec_chunking_pipeline_hierarchical(
 # ─────────────────────────────────────────────────────────────────────────────
 #%%
 if __name__ == "__main__":
-    RAW_DIR  = '/Users/nadavsmacbookair/Desktop/Thesis/data/html/indexed at 07-07-26/batch_10'
+    RAW_DIR  = '/Users/nadavsmacbookair/Desktop/Thesis/data/html/indexed at 07-07-26/batch_12'
     RAW_FILES = [f for f in os.listdir(RAW_DIR) if f.endswith(".html")]
 
     BUDGET = 200

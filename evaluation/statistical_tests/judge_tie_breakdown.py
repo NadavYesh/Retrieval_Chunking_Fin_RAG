@@ -189,7 +189,7 @@ def config_summary(df: pd.DataFrame, workbook: Path) -> pd.DataFrame:
     retrieval = pd.read_excel(workbook, sheet_name="config_summary").set_index("config_key")
     keep = [
         "level", "mode", "enhance_query_flag", "section_alpha",
-        "soft_MRR", "soft_Recall@3", "evidence_hit", "word_recall", "num_recall",
+        "soft_MRR", "soft_Recall@3", "word_recall", "num_recall",
     ]
     summary = config_scores(df).join(retrieval[keep])
     for metric in ("soft_MRR", "soft_Recall@3"):
@@ -199,8 +199,9 @@ def config_summary(df: pd.DataFrame, workbook: Path) -> pd.DataFrame:
 
 def write_workbook(path: Path, runs: pd.DataFrame, summary: pd.DataFrame,
                    verdicts: pd.DataFrame, ties: pd.DataFrame,
-                   vs_base: pd.DataFrame, p_best: pd.Series) -> None:
-    """One sheet per artefact, so the whole judge analysis travels as a single file."""
+                   vs_base: pd.DataFrame, p_best: pd.Series,
+                   retrieval: dict[str, dict] | None = None) -> None:
+    """One sheet per artefact, so the whole judge (and retrieval) analysis travels as a single file."""
     with pd.ExcelWriter(path, engine="openpyxl") as xl:
         runs.to_excel(xl, sheet_name="runs_ordinal", index=False)
         summary.to_excel(xl, sheet_name="config_summary")
@@ -208,6 +209,11 @@ def write_workbook(path: Path, runs: pd.DataFrame, summary: pd.DataFrame,
         ties.to_excel(xl, sheet_name="tie_summary")
         vs_base.to_excel(xl, sheet_name="vs_baseline")
         p_best.rename("p_best").to_excel(xl, sheet_name="p_best")
+        for metric, report in (retrieval or {}).items():
+            tag = metric.replace("soft_", "").replace("@", "")  # e.g. "soft_Recall@3" -> "Recall3"
+            report["scores"].rename(metric).to_excel(xl, sheet_name=f"retr_{tag}_scores")
+            report["sep"]["table"].to_excel(xl, sheet_name=f"retr_{tag}_separation")
+            report["p_best"].rename("p_best").to_excel(xl, sheet_name=f"retr_{tag}_bootstrap")
 
 
 def paired_wilcoxon(wide: pd.DataFrame, a: str, b: str) -> tuple[float, float]:
@@ -261,15 +267,16 @@ def separation_test(wide: pd.DataFrame, scores: pd.DataFrame, alpha: float = 0.0
     }
 
 
-def pooled_vs_baseline(df: pd.DataFrame, winners: list[str]) -> tuple[float, float]:
+def pooled_vs_baseline(df: pd.DataFrame, winners: list[str], metric: str = "ordinal") -> tuple[float, float]:
     """
     The tied leaders pooled into one arm, tested against the baseline.
 
     Averaging the winners' per-query scores before testing asks whether the leading
     group clears the reference, which is the only claim their mutual
-    indistinguishability permits. Works for any number of winners.
+    indistinguishability permits. Works for any number of winners, and for any
+    per-query metric column (judge ordinal score, or a retrieval metric).
     """
-    wide = query_by_config(df)
+    wide = query_by_config(df, value=metric)
     pooled = wide[winners].mean(axis=1)
     diff = pooled - wide[BASELINE_KEY]
     nonzero = diff[diff != 0]
@@ -304,13 +311,8 @@ def bootstrap_best(wide: pd.DataFrame, n_boot: int = N_BOOT) -> pd.Series:
     queries = wide.index.to_numpy()
     wins = np.zeros(wide.shape[1], dtype=int)
     for _ in range(n_boot):
-        means = wide.loc[rng.choice(queries, len(queries), replace=True)].mean().to_numpy() # this collapses across queries
+        means = wide.loc[rng.choice(queries, len(queries), replace=True)].mean().to_numpy()  # collapses across queries
         wins[np.argmax(means)] += 1
-    print("===============================\nBootstrap Details:\n")
-    for m in means:
-        print(m)
-    print("===============================\n\n")
-
     return pd.Series(wins / n_boot, index=wide.columns).sort_values(ascending=False)
 
 
@@ -379,6 +381,77 @@ def decided_denominators(df: pd.DataFrame) -> pd.DataFrame:
             f"at_full_{N_QUERIES}": int((decided == N_QUERIES).sum()),
         }
     return pd.DataFrame(rows)
+
+
+# ── Retrieval metrics (Section~\ref{sec:results-retrieval} of the thesis) ─────
+#
+# The judge ranking above answers SQ2 on the ordinal score; this reruns the exact
+# same battery of tests (separation from the field, a query-cluster bootstrap,
+# leader/pooled/marginal comparisons against the sparse baseline) on the two
+# retrieval metrics instead, which is what SQ1 is actually decided on. Every
+# helper above is metric-agnostic (query_by_config, separation_test,
+# pooled_vs_baseline, bootstrap_best all take a `value`/`metric` argument), so
+# nothing above needed to change -- this section only adds the retrieval-specific
+# plumbing: per-config mean scores (no judge verdict labels involved) and the
+# hybrid/dense-vs-sparse marginal comparison that has no judge analogue.
+
+RETRIEVAL_METRICS = ["soft_MRR", "soft_Recall@3"]
+MARGINAL_MODES = ["hybrid", "dense"]
+MARGINAL_ALPHA = 0.0  # alpha=1 is treated as an ablation elsewhere, not a crossed factor
+
+
+def metric_scores(df: pd.DataFrame, metric: str) -> pd.Series:
+    """Per-configuration mean of a retrieval metric, ranked descending. No judge involved."""
+    return df.groupby("config_key")[metric].mean().sort_values(ascending=False)
+
+
+def marginal_mode_vs_sparse(df: pd.DataFrame, metric: str, mode: str,
+                             alpha: float = MARGINAL_ALPHA) -> tuple[float, float]:
+    """
+    Paired Wilcoxon test, marginalising over chunking level and query enhancement:
+    every `mode` run at the given section_alpha vs. every sparse run at the same
+    alpha, averaged per query. This is the marginal read on SQ1 (hybrid/dense vs.
+    sparse) that does not depend on any single configuration being the leader.
+    """
+    sub = df[df["section_alpha"] == alpha]
+    pivot = sub.pivot_table(index="query", columns="mode", values=metric, aggfunc="mean")
+    diff = pivot[mode] - pivot["sparse"]
+    nonzero = diff[diff != 0]
+    p = 1.0 if nonzero.empty else wilcoxon(nonzero).pvalue
+    return diff.mean(), p
+
+
+def retrieval_report(df: pd.DataFrame, metric: str) -> dict:
+    """
+    One retrieval metric, put through the same tests as the judge ordinal score:
+    ranking, leader-separation, bootstrap P(best), and baseline comparisons at
+    three levels of pooling (single leader, pooled non-sparse top three, marginal
+    mode-vs-sparse).
+    """
+    scores = metric_scores(df, metric)
+    wide = query_by_config(df, value=metric)
+    sep = separation_test(wide, scores)
+    p_best = bootstrap_best(wide)
+
+    leader = scores.index[0]
+    leader_delta, leader_p = paired_wilcoxon(wide, leader, BASELINE_KEY)
+
+    non_sparse_top3 = [c for c in scores.index if c != BASELINE_KEY][:TRIO_WINNERS]
+    pooled_delta, pooled_p = pooled_vs_baseline(df, non_sparse_top3, metric=metric)
+
+    marginal = {
+        mode: marginal_mode_vs_sparse(df, metric, mode) for mode in MARGINAL_MODES
+    }
+
+    return {
+        "scores": scores,
+        "sep": sep,
+        "p_best": p_best,
+        "non_sparse_top3": non_sparse_top3,
+        "leader_vs_baseline": (leader_delta, leader_p),
+        "pooled_vs_baseline": (pooled_delta, pooled_p),
+        "marginal_vs_sparse": marginal,
+    }
 
 
 def main() -> None:
@@ -462,9 +535,43 @@ def main() -> None:
     print(f"  P(best is one of the {CO_WINNERS} co-winners) = "
           f"{p_best[sep['co_winners']].sum():.3f}")
 
+    # ── Retrieval metrics: same battery of tests, on soft_MRR / soft_Recall@3 ──
+    print("\n" + "=" * 70)
+    print("RETRIEVAL METRICS (soft_MRR / soft_Recall@3) -- SQ1, same procedure as above")
+    print("=" * 70)
+
+    retrieval_reports: dict[str, dict] = {}
+    for metric in RETRIEVAL_METRICS:
+        report = retrieval_report(df, metric)
+        retrieval_reports[metric] = report
+        r_scores, r_sep, r_p_best = report["scores"], report["sep"], report["p_best"]
+
+        print(f"\n-- {metric} --")
+        print(r_scores.head(8).round(4).to_string())
+        base_rank = r_scores.index.get_loc(BASELINE_KEY) + 1
+        print(f"  baseline {BASELINE_KEY}: {r_scores[BASELINE_KEY]:.4f} (rank {base_rank})")
+
+        print(f"\n  Leader {r_scores.index[0]} against each lower-scoring configuration:")
+        print("  " + r_sep["table"].head(10).round(4).to_string().replace("\n", "\n  "))
+        print(f"  Leading set = {len(r_sep['leaders'])} of {len(r_scores)} configurations "
+              f"indistinguishable from rank 1.")
+
+        print(f"\n  P(best), {N_BOOT} query-cluster bootstraps:")
+        print(r_p_best.head(6).round(3).to_string())
+
+        ld, lp = report["leader_vs_baseline"]
+        pdel, pp = report["pooled_vs_baseline"]
+        print(f"\n  Against the sparse baseline directly:")
+        print(f"    leader vs. sparse baseline:                  delta={ld:+.4f}  p={lp:.4f}")
+        print(f"    pooled top three (non-sparse) vs. baseline:  delta={pdel:+.4f}  p={pp:.4f}")
+        for mode, (md, mp) in report["marginal_vs_sparse"].items():
+            print(f"    {mode:<6} vs. sparse (marginal, alpha={MARGINAL_ALPHA:.0f}):      "
+                  f"delta={md:+.4f}  p={mp:.4f}")
+
     out_path = workbook.parent / OUT_NAME
-    write_workbook(out_path, df, scores, verdict_table(df), tie_summary(df), vb, p_best)
-    print(f"\nJudge analysis written to {out_path}")
+    write_workbook(out_path, df, scores, verdict_table(df), tie_summary(df), vb, p_best,
+                   retrieval=retrieval_reports)
+    print(f"\nJudge + retrieval analysis written to {out_path}")
 
 
 if __name__ == "__main__":

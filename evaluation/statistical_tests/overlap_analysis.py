@@ -214,6 +214,32 @@ def cross_level_agreement(runs: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def level_collapse_correlation(runs: pd.DataFrame) -> pd.DataFrame:
+    """
+    Pairwise phi coefficient between levels' collapse PROPENSITY, holding
+    (query, mode, enhancement, alpha) fixed.
+
+    Distinct from cross_level_agreement: that measures whether two levels return
+    the SAME retrieved ids (identity). This measures whether a level's run
+    collapsing with ANY partner in the whole grid predicts whether the OTHER
+    level's run at that same cell also collapses (co-occurrence of the collapse
+    event itself, not of its content) -- the direct test of "L2 and L3 correlate
+    most", stated as a correlation rather than read off Table~tab:overlap-axes'
+    single blended within-group percentage, which pools all level pairs together.
+    """
+    cell = ["finder_id", "mode", "enhanced", "section_alpha"]
+    indicator = runs.assign(collapsed=(runs.gsize >= 2).astype(int))
+    wide = indicator.pivot_table(index=cell, columns="level", values="collapsed", aggfunc="first")
+    rows = []
+    for a, b in combinations(LEVELS, 2):
+        if a not in wide or b not in wide:
+            continue
+        matched = wide[[a, b]].dropna()
+        phi = matched[a].corr(matched[b])
+        rows.append({"pair": f"L{a} vs L{b}", "cells": len(matched), "phi": phi})
+    return pd.DataFrame(rows)
+
+
 def alpha_suppresses_mode(runs: pd.DataFrame) -> pd.DataFrame:
     """Within a fixed (query, level, enhancement) cell, do all three modes agree?"""
     cell = runs.groupby(["finder_id", "level", "enhanced", "section_alpha"])["ids"].nunique()
@@ -295,6 +321,9 @@ def main() -> None:
 
     print("\n== PAIRWISE CROSS-LEVEL AGREEMENT (query, mode, enh, alpha held fixed) ==")
     print(cross_level_agreement(runs).to_string(index=False, float_format="%.2f"))
+
+    print("\n== PAIRWISE CROSS-LEVEL COLLAPSE CORRELATION (phi, same cells as above) ==")
+    print(level_collapse_correlation(runs).to_string(index=False, float_format="%.3f"))
 
     print("\n== DOES alpha=1 SUPPRESS THE RETRIEVAL-MODE AXIS? ==")
     print(alpha_suppresses_mode(runs).to_string(index=False, float_format="%.1f"))

@@ -9,7 +9,7 @@ import re
 
 
 # Define the target directory
-SAVE_PATH = "/Users/nadavsmacbookair/Desktop/Thesis/data/html"
+SAVE_PATH = '/Users/nadavsmacbookair/Desktop/Thesis/data/html/indexed at 07-07-26'
 if not os.path.exists(SAVE_PATH):
     os.makedirs(SAVE_PATH)
 
@@ -19,9 +19,9 @@ SP500_REFERENCE_CSV = "/Users/nadavsmacbookair/Desktop/Thesis/data/reference/sp5
 FILINGS_PER_TICKER = 6  # ~fiscal years 2018-2024
 
 # Extract tickers: generally 1-5 chars, excluding common names from your list
-exclude_names = {"cola", "intel", "apple", "tesla", "exxon", "google"}
+include_names = {"ma","nke","yum"}
 companies = pd.read_csv(SP500_REFERENCE_CSV)["Symbol"].tolist()
-tickers = [t.upper() for t in companies if len(t) <= 5 and t.lower() not in exclude_names]
+tickers = [t.upper() for t in companies if len(t) <= 5 and t.lower() in include_names]
 
 print(f"Starting download for tickers: {tickers}")
 

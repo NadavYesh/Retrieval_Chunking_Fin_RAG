@@ -370,7 +370,7 @@ def run_multi_evaluation_lazy(
                 print(f"      [gen] batching {len(batch_items)} unique retrieval(s) for this question "
                       f"in one call ({len(group_keys)} configs total)")
                 try:
-                    batch_results = generate_llm_answers_batch(batch_items, gen_model, gen_tokenizer, completion_batch_size=1,prefill_batch_size=1)
+                    batch_results = generate_llm_answers_batch(batch_items, gen_model, gen_tokenizer, completion_batch_size=1,prefill_batch_size=2)
                     for retrieval_key, (answer, _) in zip(batch_keys, batch_results):
                         n_shared = len(overlap_groups[retrieval_key])
                         shared_note = f" ({n_shared} configs share this)" if n_shared > 1 else ""
@@ -482,7 +482,7 @@ if __name__ == "__main__":
         #write_config(tickers=["tsla"], levels=LEVELS, retrieval_modes=["hybrid","dense","sparse"], enhance_query_flag = [True, False], section_alpha = [0 ,1]),
         # write_config(tickers=["tsla"], levels=[1], retrieval_modes=["sparse"], enhance_query_flag = [False], section_alpha = [0,1]),
         # write_config(tickers=["tsla","pypl","aapl","nvda"], levels=LEVELS, retrieval_modes=["sparse","dense","hybrid"], enhance_query_flag = [True,False], section_alpha = [0,1]),
-        write_config(tickers=["ko","wmt","jpm"], levels=LEVELS, retrieval_modes=["sparse","dense","hybrid"], enhance_query_flag = [True,False], section_alpha = [0,1]),
+        write_config(tickers=["mdlz","ma","yum","nem","iff"], levels=LEVELS, retrieval_modes=["sparse","dense","hybrid"], enhance_query_flag = [True,False], section_alpha = [0,1]),
     
     ]
     print(f"Running {len(configs)} configs...")
