@@ -6,7 +6,7 @@ import time
 from datetime import datetime
 from mlx_lm import load, generate
 from db.database import get_qdrant_client
-from prompts import RAG_ANSWER_PROMPT, META_EXTRACT_PROMPT
+from prompts import RAG_ANSWER_PROMPT
 from utils import parse_metadata_response, year_weights, _default_year_window
 
 
@@ -291,52 +291,52 @@ def get_all_chunks_for_payload(coll_name, payload_must=None):
             break
     return all_points
 
-def search_agent(user_query, model, tokenizer, embed_model, coll_name, ENAHNCE_QUERY=True, BOTH = True):
-    """
-    1. Enhances the user query for vector search using an LLM. [depends on the boolean]
-    2. Extracts payload filters (ticker, year, form_type).
-    3. Embeds the optimized prompt.
-    4. Calls search_with_payload to get results.
-    """
-    messages = [
-        {"role": "system", "content": META_EXTRACT_PROMPT},
-        {"role": "user", "content": user_query} # instead of embdding the query within the META_EXTRACT_PROMPT
-    ]
+# def search_agent(user_query, model, tokenizer, embed_model, coll_name, ENAHNCE_QUERY=True, BOTH = True):
+#     """
+#     1. Enhances the user query for vector search using an LLM. [depends on the boolean]
+#     2. Extracts payload filters (ticker, year, form_type).
+#     3. Embeds the optimized prompt.
+#     4. Calls search_with_payload to get results.
+#     """
+#     messages = [
+#         {"role": "system", "content": META_EXTRACT_PROMPT},
+#         {"role": "user", "content": user_query} # instead of embdding the query within the META_EXTRACT_PROMPT
+#     ]
     
-    prompt = tokenizer.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True
-    )
+#     prompt = tokenizer.apply_chat_template(
+#         messages, tokenize=False, add_generation_prompt=True
+#     )
     
-    # Generate LLM response
-    response_text = generate(model, tokenizer, prompt=prompt, verbose=False)
-    try:
-        meta           = parse_metadata_response(response_text, fallback_query=user_query)
-        opt_retr_query = meta["optimized_query"]
-        payload_filters = {k: meta[k] for k in ("ticker", "year", "form_type") if meta.get(k)}
+#     # Generate LLM response
+#     response_text = generate(model, tokenizer, prompt=prompt, verbose=False)
+#     try:
+#         meta           = parse_metadata_response(response_text, fallback_query=user_query)
+#         opt_retr_query = meta["optimized_query"]
+#         payload_filters = {k: meta[k] for k in ("ticker", "year", "form_type") if meta.get(k)}
         
-        # Embed the optimized prompt
+#         # Embed the optimized prompt
         
-        query_vec_enhanced = embed_model.encode(opt_retr_query, 
-                                                prompt_name="Retrieval-query").tolist()
+#         query_vec_enhanced = embed_model.encode(opt_retr_query, 
+#                                                 prompt_name="Retrieval-query").tolist()
         
-        query_vec_raw = embed_model.encode(user_query,
-                                           prompt_name="Retrieval-query").tolist()
+#         query_vec_raw = embed_model.encode(user_query,
+#                                            prompt_name="Retrieval-query").tolist()
         
-        # Call the search function
-        if ENAHNCE_QUERY and BOTH:
-            results_enhanced = search_with_payload(coll_name, query_vec_enhanced, payload_must=payload_filters)
-            results_raw = search_with_payload(coll_name, query_vec_raw, payload_must=payload_filters)
-            return opt_retr_query, results_enhanced, results_raw
-        elif ENAHNCE_QUERY:
-            results_enhanced = search_with_payload(coll_name, query_vec_enhanced, payload_must=payload_filters)
-            return opt_retr_query, results_enhanced, None
-        else:
-            results_raw = search_with_payload(coll_name, query_vec_raw, payload_must=payload_filters)
-            return None,None,results_raw
+#         # Call the search function
+#         if ENAHNCE_QUERY and BOTH:
+#             results_enhanced = search_with_payload(coll_name, query_vec_enhanced, payload_must=payload_filters)
+#             results_raw = search_with_payload(coll_name, query_vec_raw, payload_must=payload_filters)
+#             return opt_retr_query, results_enhanced, results_raw
+#         elif ENAHNCE_QUERY:
+#             results_enhanced = search_with_payload(coll_name, query_vec_enhanced, payload_must=payload_filters)
+#             return opt_retr_query, results_enhanced, None
+#         else:
+#             results_raw = search_with_payload(coll_name, query_vec_raw, payload_must=payload_filters)
+#             return None,None,results_raw
             
-    except Exception as e:
-        print(f"Error in search_agent: {e}")
-        return None, None
+#     except Exception as e:
+#         print(f"Error in search_agent: {e}")
+#         return None, None
 
 def _build_rag_prompt(user_query, search_results, tokenizer):
     """
