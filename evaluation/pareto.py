@@ -7,10 +7,8 @@ df = pd.read_excel(
     sheet_name="baseline_comparison",
 )
 
-metric_cols = ["Δ_word_recall", "Δ_num_recall", 
-                "Δ_soft_MRR", 
-                "Δ_soft_Recall@3",
-                 "Δ_soft_NDCG@5"
+metric_cols = ["Δ_word_recall", "Δ_num_recall",
+                "Δ_soft_Recall@5",
                 ]
 values = df[metric_cols].to_numpy()
 
