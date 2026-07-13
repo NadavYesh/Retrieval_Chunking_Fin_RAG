@@ -112,13 +112,7 @@ def get_embedding(texts, model, tokenizer):
     return outputs.text_embeds.tolist() # mean pooled and normalized embeddings
 
 def upsert_data(chunk_paths, coll_name_dense, level_3_enriched=False):
-    print(f"WARNING: are you absolutuley sure you want to ingest data? Make sure you are not replicating.\nthis is collection {coll_name_dense}")
-    # confirm = input("Type 'y' to proceed with ingestion: ")
-    # if confirm.lower() != 'y':
-    #     print("Ingestion aborted.")
-    #     return
-
-
+    # uses mlx_embeddings
     embed_model, embed_tokenizer = emb_load("mlx-community/embeddinggemma-300m-bf16")
 
     upsert_batch = 42
@@ -164,6 +158,7 @@ def upsert_data(chunk_paths, coll_name_dense, level_3_enriched=False):
             batch_texts_prompt          = [f" | text: {b}" for b in batch_texts]
             batch_metadatas_prompt      = [fmt_title(b) for b in batch_metadatas]
             formatted_doc = [b_meta + b_txt for (b_meta,b_txt) in zip(batch_metadatas_prompt, batch_texts_prompt)]
+            # embed_model, embed_tokenizer are mlx_embeddings objects
             embeddings = get_embedding(formatted_doc, embed_model, embed_tokenizer)
 
             

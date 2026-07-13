@@ -15,12 +15,15 @@ Reproduction caveat (read before quoting numbers)
     from the local run in wording and occasionally in content. This is a
     re-run, not a bit-exact reproduction.
 
-Serving (vLLM, OpenAI-compatible):
-    # Qwen3.5 needs vLLM from main, not a stable release
-    vllm serve cyankiwi/Qwen3.5-9B-AWQ-4bit --quantization awq \
-        --max-model-len 32768 --port 8000
-    # w4a16 is compressed-tensors; vLLM reads the scheme from the checkpoint
-    vllm serve RedHatAI/phi-4-quantized.w4a16 --max-model-len 16384 --port 8001
+Serving (vLLM, OpenAI-compatible) -- ON THE GPU BOX, never on the Mac:
+    # Qwen3.5 needs vLLM from main, not a stable release.
+    # Do NOT pass --quantization awq: despite the repo name this checkpoint ships as
+    # compressed-tensors, and forcing awq makes vLLM refuse to start. Both models let
+    # vLLM read the scheme straight from the checkpoint.
+    vllm serve cyankiwi/Qwen3.5-9B-AWQ-4bit \
+        --max-model-len 32768 --host 0.0.0.0 --port 8000
+    vllm serve RedHatAI/phi-4-quantized.w4a16 \
+        --max-model-len 16384 --host 0.0.0.0 --port 8000
 
 Configure via environment:
     LLM_BACKEND=api            # "mlx" (default) or "api"

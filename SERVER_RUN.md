@@ -38,17 +38,37 @@ Rejected alternatives:
   A legitimate choice if you have an 80GB card and would rather remove the judge's
   quantization as a variable entirely.
 
-## Serve
+## Serve — on the GPU box, never on the Mac
 
-Qwen3.5 needs vLLM from **main**, not a stable release.
+vLLM is a CUDA server. Installing it on the Mac gets you a CPU-only build that fails with
+`Failed to import from vllm._C` / `cpu_fused_moe`. The Mac needs nothing beyond `requests`;
+it only makes HTTP calls.
+
+Qwen3.5 needs vLLM from **main**, not a stable release:
 
 ```bash
-vllm serve cyankiwi/Qwen3.5-9B-AWQ-4bit --quantization awq \
-    --max-model-len 32768 --port 8000        # contexts reach ~28k tokens
-
-# no --quantization flag: vLLM reads compressed-tensors w4a16 from the checkpoint
-vllm serve RedHatAI/phi-4-quantized.w4a16 --max-model-len 16384 --port 8001
+pip install -U "vllm @ git+https://github.com/vllm-project/vllm.git"
 ```
+
+Serve one model at a time — `run_rag_lazy.py` only uses Qwen and `evaluation_run.py` only
+uses Phi-4, so they never need to be up together:
+
+```bash
+vllm serve cyankiwi/Qwen3.5-9B-AWQ-4bit \
+    --max-model-len 32768 --host 0.0.0.0 --port 8000   # contexts reach ~28k tokens
+
+vllm serve RedHatAI/phi-4-quantized.w4a16 \
+    --max-model-len 16384 --host 0.0.0.0 --port 8000
+```
+
+Two flags that are not optional:
+
+- **No `--quantization` flag.** Despite its name, `cyankiwi/Qwen3.5-9B-AWQ-4bit` ships as
+  *compressed-tensors*, not classic AWQ; passing `--quantization awq` makes vLLM refuse to
+  start ("Quantization method specified in the model config (compressed-tensors) does not
+  match ... (awq)"). Let vLLM read the scheme from the checkpoint, for both models.
+- **`--host 0.0.0.0`.** vLLM defaults to binding localhost, which a cloud provider's HTTP
+  proxy cannot reach.
 
 `--max-model-len 32768` is not padding: the p95 retrieved context is ~10k tokens and the
 longest observed is ~28k (a Level-2 parent-fetch case).
