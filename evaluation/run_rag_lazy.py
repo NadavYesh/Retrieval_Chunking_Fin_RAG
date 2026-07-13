@@ -23,7 +23,6 @@ from search_engine import (
     search_with_payload, search_bm25, rrf_fuse, rrf_fuse_multi, generate_llm_answers_batch,
     search_dense_for_year, search_bm25_for_year,
 )
-from FinDER import run_finder
 from evaluation.section_routing import make_section_filter, section_fuse
 from evaluation.build_evaluation_dataset import load_dataset, DATASET_PATH
 
@@ -60,6 +59,49 @@ _MODE_LABEL = {"dense": "DENSE", "sparse": "BM25", "hybrid": "HYBRID"}
 def _short_level(level: int) -> str:
     """1 -> 'L1', 2 -> 'L2', etc."""
     return f"L{level}"
+
+
+# Rank-fusion constant for collapsing child hits onto their Level 1 parents.
+# Same 1/(k + rank) primitive as rrf_fuse, so parent ranking stays on the same
+# scale as the dense/sparse fusion that produced the child ranks. Smaller k makes
+# the top-ranked child dominate; larger k flattens the rank gaps and lets sheer
+# vote count take over (at the usual k=60 any two children outrank a lone rank-1
+# child, which is too weak a bar at a retrieval depth of 5).
+# k=3 is the value that keeps both properties we want at this depth:
+#   - two children in the top 3 outrank a lone rank-1 child   (0.450 > 0.333)
+#   - a lone rank-1 child outranks any pair ranked 4th/5th    (0.333 > 0.310)
+PARENT_RRF_K = 3
+
+
+def _collapse_to_parents(context_points, client, fetch_coll, rrf_k: int = PARENT_RRF_K):
+    """
+    Map child hits onto their Level 1 parents, ranked by RRF over the child ranks.
+
+    A parent's score is sum(1 / (rrf_k + rank)) over every child of that parent
+    present in context_points, with rank being the child's 0-based position in the
+    (already fused, already sorted) child ranking. A parent hit by several children
+    therefore ranks above a parent hit by one child of similar rank, while a single
+    strong child still outweighs several weak ones.
+
+    The fetched parents are then re-sorted back into the ranking computed here.
+    Qdrant's retrieve() does in fact return points in the order the ids were passed
+    (verified against 1.18.1), but it returns no score and the ordering is not a
+    documented guarantee, so the sort is explicit rather than assumed.
+    """
+    scores: dict[str, float] = {}
+    for rank, p in enumerate(context_points):
+        pid = p.payload.get("parent_id")
+        if not pid:
+            continue
+        scores[pid] = scores.get(pid, 0.0) + 1.0 / (rrf_k + rank)
+
+    if not scores:
+        return context_points
+
+    parent_ids = sorted(scores, key=lambda pid: -scores[pid])
+    order      = {str(pid): i for i, pid in enumerate(parent_ids)}
+    fetched    = client.retrieve(fetch_coll, ids=parent_ids, with_payload=True)
+    return sorted(fetched, key=lambda p: order.get(str(p.id), len(order)))
 
 
 def _lookup(dataset: pd.DataFrame, finder_id: str, ticker: str, enhance_flag: bool) -> dict:
@@ -142,7 +184,7 @@ def run_multi_evaluation_lazy(
     # Resume support: skip already-completed questions (0-indexed) for tickers whose
     # prior run was interrupted mid-way -- e.g. {"tsla": 5} resumes tsla at question 5
     # (i.e. questions[5:]) while every other ticker still runs from question 0.
-    RESUME_FROM = {"ko": 3}
+    RESUME_FROM = {"yum": 2}
 
     ticker_groups: dict[tuple, list[tuple[int, dict]]] = defaultdict(list)
     for i, cfg in enumerate(configs):
@@ -151,9 +193,13 @@ def run_multi_evaluation_lazy(
 
     for ticker_tuple, cfg_group in ticker_groups.items():
         tickers   = list(ticker_tuple)
-        finder_df = run_finder(tickers=tickers)
+        # Sourced from the precomputed dataset (not a live FinDER read) so the question
+        # set run here always matches what build_evaluation_dataset.py has actually
+        # computed lookups for -- a question FinDER has but the dataset doesn't can't
+        # be reached here in the first place, instead of surfacing as a _lookup KeyError.
+        finder_df = dataset[dataset["ticker"].isin(tickers)].reset_index(drop=True)
         if finder_df.empty:
-            print(f"  [skip] no FinDER questions for {tickers}")
+            print(f"  [skip] no dataset questions for {tickers}")
             continue
 
         n_q = len(finder_df)
@@ -185,23 +231,29 @@ def run_multi_evaluation_lazy(
         for q_idx, (_, row) in enumerate(finder_df.iterrows()):
             if q_idx < skip_before:
                 continue
-            finder_id    = row.get("_id", "")
+            finder_id    = row.get("finder_id", "")
             orig_query   = row.get("query", "")
             truth_answer = row.get("truth_answer", "")
             truth_ref    = row.get("truth_ref", "")
             category     = row.get("category", "")
-            query_type   = row.get("type", "")
+            query_type   = row.get("query_type", "")
             print(f"\n[Q {q_idx+1}/{n_q}] {orig_query}")
 
-            # Build per-enhance-flag precomputed lookup (orig + enhanced variants)
-            precomp_cache: dict[bool, dict] = {}
-            for enh_flag in {cfg["enhance_query_flag"] for _, cfg in cfg_group}:
-                precomp_cache[enh_flag] = _lookup(dataset, finder_id, ticker_str, enh_flag)
-                pc  = precomp_cache[enh_flag]
-                tag = "ENH" if enh_flag else "PLAIN"
-                if enh_flag:
-                    print(f"  [pre computed enhanced query] → {pc['query'][:160]}...")
-                print(f"  [meta/{tag}] ticker={pc['meta'].get('ticker')} year={pc['meta'].get('year')}")
+            # Build per-enhance-flag precomputed lookup (orig + enhanced variants). finder_df
+            # is itself filtered from `dataset`, so this should always hit -- the try/except
+            # is just a safety net against the checkpoint being lost to an unexpected miss.
+            try:
+                precomp_cache: dict[bool, dict] = {}
+                for enh_flag in {cfg["enhance_query_flag"] for _, cfg in cfg_group}:
+                    precomp_cache[enh_flag] = _lookup(dataset, finder_id, ticker_str, enh_flag)
+                    pc  = precomp_cache[enh_flag]
+                    tag = "ENH" if enh_flag else "PLAIN"
+                    if enh_flag:
+                        print(f"  [pre computed enhanced query] → {pc['query'][:160]}...")
+                    print(f"  [meta/{tag}] ticker={pc['meta'].get('ticker')} year={pc['meta'].get('year')}")
+            except KeyError as e:
+                print(f"  [skip] {e}")
+                continue
 
             # Retrieval cache: (query_text, level) → {dense, sparse}
             # section_alpha is intentionally excluded — retrieval is shared across alpha variants
@@ -316,10 +368,8 @@ def run_multi_evaluation_lazy(
                                     context_points = track_b[:top_k]
 
                             if use_parent_fetch and context_points:
-                                parent_ids = list({p.payload.get("parent_id") for p in context_points if p.payload.get("parent_id")})
-                                if parent_ids:
-                                    fetch_coll = PARENT_COLL_BM25 if retrieval_mode == "sparse" else PARENT_COLL_DENSE
-                                    context_points = client.retrieve(fetch_coll, ids=parent_ids, with_payload=True)
+                                fetch_coll     = PARENT_COLL_BM25 if retrieval_mode == "sparse" else PARENT_COLL_DENSE
+                                context_points = _collapse_to_parents(context_points, client, fetch_coll)
 
                         except Exception as e:
                             print(f"      [ERROR] {e}")
@@ -370,7 +420,7 @@ def run_multi_evaluation_lazy(
                 print(f"      [gen] batching {len(batch_items)} unique retrieval(s) for this question "
                       f"in one call ({len(group_keys)} configs total)")
                 try:
-                    batch_results = generate_llm_answers_batch(batch_items, gen_model, gen_tokenizer, completion_batch_size=1,prefill_batch_size=2)
+                    batch_results = generate_llm_answers_batch(batch_items, gen_model, gen_tokenizer, completion_batch_size=1,prefill_batch_size=1)
                     for retrieval_key, (answer, _) in zip(batch_keys, batch_results):
                         n_shared = len(overlap_groups[retrieval_key])
                         shared_note = f" ({n_shared} configs share this)" if n_shared > 1 else ""
@@ -482,7 +532,7 @@ if __name__ == "__main__":
         #write_config(tickers=["tsla"], levels=LEVELS, retrieval_modes=["hybrid","dense","sparse"], enhance_query_flag = [True, False], section_alpha = [0 ,1]),
         # write_config(tickers=["tsla"], levels=[1], retrieval_modes=["sparse"], enhance_query_flag = [False], section_alpha = [0,1]),
         # write_config(tickers=["tsla","pypl","aapl","nvda"], levels=LEVELS, retrieval_modes=["sparse","dense","hybrid"], enhance_query_flag = [True,False], section_alpha = [0,1]),
-        write_config(tickers=["mdlz","ma","yum","nem","iff"], levels=LEVELS, retrieval_modes=["sparse","dense","hybrid"], enhance_query_flag = [True,False], section_alpha = [0,1]),
+        write_config(tickers=["yum","nem","iff"], levels=LEVELS, retrieval_modes=["sparse","dense","hybrid"], enhance_query_flag = [True,False], section_alpha = [0,1]),
     
     ]
     print(f"Running {len(configs)} configs...")
