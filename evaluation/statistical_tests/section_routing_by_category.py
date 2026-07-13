@@ -7,19 +7,24 @@ and section_alpha=1 with an otherwise identical config, so trials pair exactly
 on (query, base_config). That pairing is what the tests below exploit.
 
 Metrics
-  soft_Recall@3  binary per trial  -> exact McNemar (binomial on discordant pairs)
-  soft_MRR       continuous        -> Wilcoxon signed-rank on paired differences
+  soft_Recall@5  binary per trial  -> exact McNemar (binomial on discordant pairs)
   ordinal        continuous (mean of relevance_int/completeness_int vs. the fixed
                  BM25 baseline, Section~\ref{sec:results-judge}'s primary judge
                  score) -> Wilcoxon signed-rank, same pairing, when the workbook
                  carries judge columns (skipped otherwise -- see load_trials).
 
-soft_NDCG@5 is deliberately not computed or reported. The harness builds its
-IDCG by sorting the *retrieved* relevance scores rather than consulting the
-corpus, and retrieval depth equals the cutoff (k=5), so the "ideal" ranking is
-always a permutation of the returned list. The ratio can only see whether the
-returned chunks are ordered among themselves, never whether any is relevant.
-Recall@3 and MRR carry the retrieval signal; NDCG@5 is excluded.
+soft_Recall@5 is the retrieval metric here because the paired test used is exact
+McNemar, which needs a BINARY per-trial outcome -- "did any retrieved chunk clear the
+relevance threshold" is exactly that. soft_MRR is continuous and would need Wilcoxon
+instead; it is reported in the workbook and in judge_tie_breakdown, just not tested
+here. (soft_MRR is no longer excluded on rank-validity grounds: parent-fetch used to
+collapse level-2/3 child hits onto their level-1 parents through a set, which made
+chunk positions arbitrary, but _collapse_to_parents now ranks parents by an RRF-sum
+over their child ranks and re-sorts explicitly, so rank is well-defined.)
+NDCG@5 was independently broken anyway: the harness built its IDCG by sorting the
+*retrieved* relevance scores rather than consulting the corpus, and retrieval depth
+equalled the cutoff, so the "ideal" ranking was always a permutation of the returned
+list and the ratio could never see whether any chunk was actually relevant.
 
 Why the judge score is included despite being relative to a fixed reference
   ordinal is each config's per-query win/tie/loss against the single fixed
@@ -28,14 +33,14 @@ Why the judge score is included despite being relative to a fixed reference
   pair are scored against the SAME fixed reference, so comparing them still
   isolates what routing changes -- it asks whether routing raises or lowers the
   win-rate against a common yardstick, the same logical structure as comparing
-  soft_MRR at alpha=0 vs. alpha=1 directly. Using ordinal (the mean of relevance
+  soft_Recall@5 at alpha=0 vs. alpha=1 directly. Using ordinal (the mean of relevance
   and completeness) rather than either axis alone matches the primary score
   Section~\ref{sec:results-judge} ranks configurations on.
 
 Multiplicity
   The eight categories are scanned together and the interesting ones selected
   after the fact, so the per-category p-values are corrected across the family,
-  separately per metric (three families: Recall@3, MRR, ordinal). Holm's
+  separately per metric (two families: Recall@5, ordinal). Holm's
   step-down procedure controls the same family-wise error rate as Bonferroni and
   is uniformly more powerful, so Holm is used. Benjamini-Hochberg is reported
   alongside for readers who prefer FDR control.
@@ -69,8 +74,8 @@ DEFAULT_WORKBOOK = (
 
 ALPHA_COL = "section_alpha"
 PAIR_KEYS = ["query", "base_cfg"]
-RECALL = "soft_Recall@3"
-MRR = "soft_MRR"
+RECALL = "soft_Recall@5"
+# MRR = "soft_MRR"  -- rank-variant, not meaningful under parent-fetch (see docstring)
 ORDINAL = "ordinal"
 
 SPOTLIGHT = ["Legal", "Shareholder return", "Company overview", "Risk", "Governance"]
@@ -131,27 +136,22 @@ def category_report(trials: pd.DataFrame) -> pd.DataFrame:
     judge = has_judge(trials)
     rows = []
     for cat, sub in trials.groupby("category"):
-        r3 = pair_on_alpha(sub, RECALL)
-        mrr = pair_on_alpha(sub, MRR)
-        mc = mcnemar_exact(r3)
+        r5 = pair_on_alpha(sub, RECALL)
+        mc = mcnemar_exact(r5)
         up, down, flat = per_query_split(sub, RECALL)
         row = {
             "category": cat,
             "n_queries": sub["query"].nunique(),
-            "n_pairs": len(r3),
-            "R@3_a0": r3.a0.mean(),
-            "R@3_a1": r3.a1.mean(),
-            "R@3_delta": r3.a1.mean() - r3.a0.mean(),
+            "n_pairs": len(r5),
+            "R@5_a0": r5.a0.mean(),
+            "R@5_a1": r5.a1.mean(),
+            "R@5_delta": r5.a1.mean() - r5.a0.mean(),
             "gains": mc["gains"],
             "losses": mc["losses"],
             "mcnemar_p": mc["p"],
             "q_up": up,
             "q_down": down,
             "q_flat": flat,
-            "MRR_a0": mrr.a0.mean(),
-            "MRR_a1": mrr.a1.mean(),
-            "MRR_delta": mrr.a1.mean() - mrr.a0.mean(),
-            "wilcoxon_p": wilcoxon_paired(mrr),
         }
         if judge:
             ordinal = pair_on_alpha(sub, ORDINAL)
@@ -168,9 +168,8 @@ def category_report(trials: pd.DataFrame) -> pd.DataFrame:
 
     # Family-wise correction across the eight categories, per metric family (see docstring).
     families = [
-        ("mcnemar_p", "holm", "R@3_holm_p", "R@3_holm_sig"),
-        ("mcnemar_p", "fdr_bh", "R@3_bh_p", "R@3_bh_sig"),
-        ("wilcoxon_p", "holm", "MRR_holm_p", "MRR_holm_sig"),
+        ("mcnemar_p", "holm", "R@5_holm_p", "R@5_holm_sig"),
+        ("mcnemar_p", "fdr_bh", "R@5_bh_p", "R@5_bh_sig"),
     ]
     if judge:
         families.append(("ordinal_wilcoxon_p", "holm", "ORD_holm_p", "ORD_holm_sig"))
@@ -179,26 +178,21 @@ def category_report(trials: pd.DataFrame) -> pd.DataFrame:
         report[adj_col] = adjusted
         report[sig_col] = np.where(reject, "sig", "ns")
 
-    return report.sort_values("R@3_delta", ascending=False)
+    return report.sort_values("R@5_delta", ascending=False)
 
 
 def overall_report(trials: pd.DataFrame) -> dict:
-    r3 = pair_on_alpha(trials, RECALL)
-    mrr = pair_on_alpha(trials, MRR)
-    mc = mcnemar_exact(r3)
+    r5 = pair_on_alpha(trials, RECALL)
+    mc = mcnemar_exact(r5)
     out = {
         "n_queries": trials["query"].nunique(),
-        "n_pairs": len(r3),
-        "R@3_a0": r3.a0.mean(),
-        "R@3_a1": r3.a1.mean(),
-        "R@3_delta": r3.a1.mean() - r3.a0.mean(),
+        "n_pairs": len(r5),
+        "R@5_a0": r5.a0.mean(),
+        "R@5_a1": r5.a1.mean(),
+        "R@5_delta": r5.a1.mean() - r5.a0.mean(),
         "gains": mc["gains"],
         "losses": mc["losses"],
         "mcnemar_p": mc["p"],
-        "MRR_a0": mrr.a0.mean(),
-        "MRR_a1": mrr.a1.mean(),
-        "MRR_delta": mrr.a1.mean() - mrr.a0.mean(),
-        "wilcoxon_p": wilcoxon_paired(mrr),
     }
     if has_judge(trials):
         ordinal = pair_on_alpha(trials, ORDINAL)
@@ -225,7 +219,7 @@ def routing_destinations(trials: pd.DataFrame, category: str, top: int = 3) -> p
 
 
 def per_query_detail(trials: pd.DataFrame, category: str) -> pd.DataFrame:
-    """Recall@3 per query, so single-query drivers of a category effect are visible."""
+    """Recall@5 per query, so single-query drivers of a category effect are visible."""
     sub = trials[trials.category == category]
     table = sub.pivot_table(index="query", columns=ALPHA_COL, values=RECALL)
     table.columns = ["a0", "a1"]
@@ -262,7 +256,7 @@ def main() -> None:
     for key, value in overall_report(trials).items():
         print(f"  {key}: {value:.4g}" if isinstance(value, float) else f"  {key}: {value}")
 
-    print("\n== PER-QUERY RECALL@3 (drivers of each category effect) ==")
+    print("\n== PER-QUERY RECALL@5 (drivers of each category effect) ==")
     for cat in SPOTLIGHT:
         print(f"\n-- {cat}")
         print(per_query_detail(trials, cat).to_string(float_format="%.3f"))

@@ -189,10 +189,10 @@ def config_summary(df: pd.DataFrame, workbook: Path) -> pd.DataFrame:
     retrieval = pd.read_excel(workbook, sheet_name="config_summary").set_index("config_key")
     keep = [
         "level", "mode", "enhance_query_flag", "section_alpha",
-        "soft_MRR", "soft_Recall@3", "word_recall", "num_recall",
+        "soft_Recall@5", "word_recall", "num_recall",
     ]
     summary = config_scores(df).join(retrieval[keep])
-    for metric in ("soft_MRR", "soft_Recall@3"):
+    for metric in ("soft_Recall@5",):
         summary[f"{metric}_rank"] = summary[metric].rank(ascending=False, method="min").astype(int)
     return summary
 
@@ -210,7 +210,7 @@ def write_workbook(path: Path, runs: pd.DataFrame, summary: pd.DataFrame,
         vs_base.to_excel(xl, sheet_name="vs_baseline")
         p_best.rename("p_best").to_excel(xl, sheet_name="p_best")
         for metric, report in (retrieval or {}).items():
-            tag = metric.replace("soft_", "").replace("@", "")  # e.g. "soft_Recall@3" -> "Recall3"
+            tag = metric.replace("soft_", "").replace("@", "")  # e.g. "soft_Recall@5" -> "Recall5"
             report["scores"].rename(metric).to_excel(xl, sheet_name=f"retr_{tag}_scores")
             report["sep"]["table"].to_excel(xl, sheet_name=f"retr_{tag}_separation")
             report["p_best"].rename("p_best").to_excel(xl, sheet_name=f"retr_{tag}_bootstrap")
@@ -395,7 +395,13 @@ def decided_denominators(df: pd.DataFrame) -> pd.DataFrame:
 # plumbing: per-config mean scores (no judge verdict labels involved) and the
 # hybrid/dense-vs-sparse marginal comparison that has no judge analogue.
 
-RETRIEVAL_METRICS = ["soft_MRR", "soft_Recall@3"]
+# soft_NDCG@5 is no longer computed (graded gains over a binary relevance label add
+# nothing). soft_MRR is rank-variant, which used to make it meaningless for the
+# parent-fetch configs — level-2/3 child hits were collapsed onto their level-1
+# parents through a set, discarding the fused rank. _collapse_to_parents now ranks
+# parents by an RRF-sum over their child ranks, so the position of a retrieved chunk
+# is meaningful at every level and soft_MRR is reported alongside soft_Recall@5.
+RETRIEVAL_METRICS = ["soft_Recall@5", "soft_MRR"]
 MARGINAL_MODES = ["hybrid", "dense"]
 MARGINAL_ALPHA = 0.0  # alpha=1 is treated as an ablation elsewhere, not a crossed factor
 
@@ -478,7 +484,7 @@ def main() -> None:
 
     print("Configuration ranking by joint ordinal judge score")
     cols = ["rank", "n", "ordinal", "relevance", "completeness",
-            "soft_MRR_rank", "soft_Recall@3_rank"]
+            "soft_Recall@5_rank"]
     print(scores.head(8)[cols].round(3).to_string())
     print(f"  ... baseline {BASELINE_KEY} scores {scores.loc[BASELINE_KEY, 'ordinal']:.3f} "
           f"at rank {scores.loc[BASELINE_KEY, 'rank']}")
@@ -535,9 +541,9 @@ def main() -> None:
     print(f"  P(best is one of the {CO_WINNERS} co-winners) = "
           f"{p_best[sep['co_winners']].sum():.3f}")
 
-    # ── Retrieval metrics: same battery of tests, on soft_MRR / soft_Recall@3 ──
+    # ── Retrieval metrics: same battery of tests, on soft_Recall@5 ──
     print("\n" + "=" * 70)
-    print("RETRIEVAL METRICS (soft_MRR / soft_Recall@3) -- SQ1, same procedure as above")
+    print("RETRIEVAL METRICS (soft_Recall@5) -- SQ1, same procedure as above")
     print("=" * 70)
 
     retrieval_reports: dict[str, dict] = {}
