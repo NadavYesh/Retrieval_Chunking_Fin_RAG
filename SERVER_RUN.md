@@ -8,21 +8,35 @@ changes the local MLX behaviour.
 
 The local models are MLX quantizations with **no NVIDIA equivalent**:
 
-| local (MLX, Metal only) | quantization | server equivalent | quantization |
-|---|---|---|---|
-| `mlx-community/Qwen3.5-9B-OptiQ-4bit` | affine, group 64, **mixed** — 250 layers pinned (134 @ 8-bit, 116 @ 4-bit) | `cyankiwi/Qwen3.5-9B-AWQ-4bit` | AWQ 4-bit |
-| `mlx-community/phi-4-4bit` | affine 4-bit, group 64 | a Phi-4 checkpoint (see below) | AWQ / GPTQ / bf16 |
+| role | local (MLX, Metal only) | quantization | server | quantization |
+|---|---|---|---|---|
+| generation | `mlx-community/Qwen3.5-9B-OptiQ-4bit` | affine, group 64, **mixed** — 250 layers pinned (134 @ 8-bit, 116 @ 4-bit) | `cyankiwi/Qwen3.5-9B-AWQ-4bit` | AWQ 4-bit |
+| judge | `mlx-community/phi-4-4bit` | affine 4-bit, group 64 | `RedHatAI/phi-4-quantized.w4a16` | GPTQ INT4, group 128 |
 
 MLX's affine format is Metal-only; no CUDA runtime loads it and there is no lossless
 converter. The server runs the **same base models** at a **different 4-bit quantization**.
 Answers will differ from the local run in wording and occasionally in content. Treat this
 as a re-run, not a bit-exact reproduction, and say so in the methods section.
 
-A note on the judge: `unsloth/phi-4-bnb-4bit` works, but bitsandbytes is the slowest
-quantization path in vLLM (it exists mainly for QLoRA, not throughput serving), and
-Unsloth converted Phi-4 to the Llama architecture rather than the `Phi3ForCausalLM` used
-locally. For ~4,300 judge calls, an AWQ/GPTQ Phi-4 — or plain bf16 (14B ≈ 28GB, fits an
-80GB card) — will be materially faster.
+### Why `RedHatAI/phi-4-quantized.w4a16` for the judge
+
+It is `Phi3ForCausalLM` — the same architecture the local `mlx-community/phi-4-4bit` runs
+— so quantization is the *only* thing that changes. It is built by RedHat/Neural Magic,
+who maintain vLLM, and `compressed-tensors` w4a16 is a first-class fast kernel there. And
+it publishes accuracy recovery against unquantized Phi-4: **99.3% average** over six
+benchmarks (MMLU 99.5%, GSM-8K 99.6%, ARC-C 97.6%, HellaSwag 98.9%, Winogrande 100.2%,
+TruthfulQA 99.7%) — citable evidence that the judge is not materially degraded.
+
+Rejected alternatives:
+- `unsloth/phi-4-bnb-4bit` — Unsloth converts Phi-4 to the **Llama** architecture (a second
+  confound on top of the quantization change), and **bitsandbytes is the slowest quant path
+  in vLLM**: it exists mainly to serve QLoRA adapters, not for throughput. Wrong trade for
+  ~4,300 judge calls.
+- Community GPTQ repos (`jakiAJK/...`, `fhamborg/...`) — fine, but no published accuracy
+  recovery and not maintained by the vLLM team.
+- Plain bf16 `microsoft/phi-4` — no quantization error at all, but 14B ≈ 28GB of weights.
+  A legitimate choice if you have an 80GB card and would rather remove the judge's
+  quantization as a variable entirely.
 
 ## Serve
 
@@ -31,7 +45,9 @@ Qwen3.5 needs vLLM from **main**, not a stable release.
 ```bash
 vllm serve cyankiwi/Qwen3.5-9B-AWQ-4bit --quantization awq \
     --max-model-len 32768 --port 8000        # contexts reach ~28k tokens
-vllm serve <phi-4 checkpoint> --max-model-len 16384 --port 8001
+
+# no --quantization flag: vLLM reads compressed-tensors w4a16 from the checkpoint
+vllm serve RedHatAI/phi-4-quantized.w4a16 --max-model-len 16384 --port 8001
 ```
 
 `--max-model-len 32768` is not padding: the p95 retrieved context is ~10k tokens and the
@@ -44,7 +60,7 @@ export LLM_BACKEND=api
 export LLM_API_BASE=http://<host>:8000/v1
 export LLM_JUDGE_API_BASE=http://<host>:8001/v1
 export LLM_GEN_MODEL=cyankiwi/Qwen3.5-9B-AWQ-4bit
-export LLM_JUDGE_MODEL=<phi-4 checkpoint>
+export LLM_JUDGE_MODEL=RedHatAI/phi-4-quantized.w4a16
 export LLM_CONCURRENCY=32
 
 python -m llm_backend                  # health check: both endpoints, expected model ids

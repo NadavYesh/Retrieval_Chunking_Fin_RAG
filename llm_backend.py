@@ -19,7 +19,8 @@ Serving (vLLM, OpenAI-compatible):
     # Qwen3.5 needs vLLM from main, not a stable release
     vllm serve cyankiwi/Qwen3.5-9B-AWQ-4bit --quantization awq \
         --max-model-len 32768 --port 8000
-    vllm serve <a phi-4 checkpoint> --max-model-len 16384 --port 8001
+    # w4a16 is compressed-tensors; vLLM reads the scheme from the checkpoint
+    vllm serve RedHatAI/phi-4-quantized.w4a16 --max-model-len 16384 --port 8001
 
 Configure via environment:
     LLM_BACKEND=api            # "mlx" (default) or "api"
@@ -44,7 +45,7 @@ USE_API = os.getenv("LLM_BACKEND", "mlx").lower() == "api"
 API_BASE       = os.getenv("LLM_API_BASE", "http://localhost:8000/v1").rstrip("/")
 API_KEY        = os.getenv("LLM_API_KEY", "EMPTY")
 GEN_MODEL      = os.getenv("LLM_GEN_MODEL", "cyankiwi/Qwen3.5-9B-AWQ-4bit")
-JUDGE_MODEL    = os.getenv("LLM_JUDGE_MODEL", "unsloth/phi-4-bnb-4bit")
+JUDGE_MODEL    = os.getenv("LLM_JUDGE_MODEL", "RedHatAI/phi-4-quantized.w4a16")
 JUDGE_API_BASE = os.getenv("LLM_JUDGE_API_BASE", API_BASE).rstrip("/")
 
 # vLLM batches server-side; this only caps how many requests are in flight at once.
