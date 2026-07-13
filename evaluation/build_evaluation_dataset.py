@@ -74,7 +74,6 @@ def build_dataset(
 
     for ticker in tickers:
         finder_df = run_finder(tickers=[ticker])
-        finder_df = finder_df[:finder_df.shape[0]-1]
         if finder_df.empty:
             print(f"[skip] no FinDER questions for {ticker}")
             continue
