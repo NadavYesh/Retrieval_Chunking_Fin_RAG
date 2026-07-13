@@ -4,7 +4,7 @@ RAG evaluation analysis: retrieval statistics, truth-chunk corpus lookup, genera
 
 Retrieval metrics:
 
-  soft_MRR / soft_Recall@3 / soft_NDCG@5
+  soft_MRR / soft_Recall@3
       Per-chunk soft relevance: max(number_overlap, text_similarity) vs truth passages,
       threshold 0.30 for binary. Gives credit for "right neighbourhood" retrievals where
       chunk boundaries don't align with FinDER passages. Available for every row.
@@ -94,17 +94,6 @@ def chunk_relevance(chunk_text: str, truth_passages: list[str]) -> float:
     return best
 
 
-def _dcg(scores: list[float]) -> float:
-    return sum(s / math.log2(i + 2) for i, s in enumerate(scores))
-
-
-def _ndcg_k(relevance_scores: list[float], k: int) -> float:
-    top_k = relevance_scores[:k]
-    dcg   = _dcg(top_k)
-    idcg  = _dcg(sorted(relevance_scores, reverse=True)[:k])
-    return dcg / idcg if idcg > 0 else 0.0
-
-
 def soft_retrieval_metrics(
     retrieved_ids: list[str],
     corpus_text_map: dict[str, str],
@@ -130,8 +119,7 @@ def soft_retrieval_metrics(
     first_hit  = next((i + 1 for i, b in enumerate(binary) if b), None)
 
     result = {
-        "soft_MRR":    1.0 / first_hit if first_hit else 0.0,
-        "soft_NDCG@5": _ndcg_k(rel_scores, 5),
+        "soft_MRR": 1.0 / first_hit if first_hit else 0.0,
     }
     for k in k_values:
         result[f"soft_Recall@{k}"] = int(any(binary[:k]))
@@ -348,7 +336,7 @@ def analyze_entry(idx: str, data: dict, corpus: pd.DataFrame, fp_index: dict,
     n_truth_retrieved                — how many were actually in the retrieved top-k list
     best_truth_rank                  — 1-based rank of the highest-placed truth chunk (None if missed)
     truth_chunk_ids                  — corpus UUIDs (or 'NOT_IN_CORPUS')
-    soft_MRR, soft_Recall@3, soft_NDCG@5 — per-chunk soft relevance metrics (all rows)
+    soft_MRR, soft_Recall@3 — per-chunk soft relevance metrics (all rows)
     word_recall, num_recall          — token-level overlap between truth passages and retrieved context
     evidence_hit                     — True if word_recall ≥ 0.50 OR num_recall ≥ 0.70
     pitfalls                         — comma-separated flags: WRONG_YEAR,
@@ -467,7 +455,7 @@ def analyze_entry(idx: str, data: dict, corpus: pd.DataFrame, fp_index: dict,
     if corpus_text_map is not None and truth_refs:
         soft_metrics = soft_retrieval_metrics(retrieved_ids, corpus_text_map, truth_refs)
     else:
-        soft_metrics = {"soft_MRR": None, "soft_NDCG@5": None, "soft_Recall@3": None}
+        soft_metrics = {"soft_MRR": None, "soft_Recall@3": None}
 
     # ── Pitfall flags ──────────────────────────────────────────────────────────
     pitfalls = []
@@ -546,7 +534,6 @@ def analyze_entry(idx: str, data: dict, corpus: pd.DataFrame, fp_index: dict,
         # doesn't match the FinDER passage. Available for every row (no corpus dependency).
         # soft_MRR      — 1/rank of the first soft-relevant chunk; 0 if none in top-k
         # soft_Recall@3 — ≥1 soft-relevant chunk in the top 3 (binary)
-        # soft_NDCG@5   — graded NDCG using raw overlap scores over the top 5
         **soft_metrics,
 
         # ─── Merged-context lexical coverage ──────────────────────────────────
@@ -1027,7 +1014,10 @@ def judge_llm_batch(
     return results
 
 
-JUDGE_CHECKPOINT_CHUNK = 20  # rows per judge_llm_batch call before an atomic checkpoint write
+# Rows per judge_llm_batch call before an atomic checkpoint write. On the API backend this
+# is also the batch handed to chat_batch, so keep it at LLM_CONCURRENCY (40): at 20 only
+# half the allowed requests were ever in flight and the GPU idled between chunks.
+JUDGE_CHECKPOINT_CHUNK = 40
 
 
 def _checkpoint_df(df: pd.DataFrame, checkpoint_path: Path) -> None:
@@ -1346,7 +1336,6 @@ def _write_multi_excel(rows_df: pd.DataFrame, out_path: Path) -> None:
             "num_recall": "mean",
             "soft_MRR": "mean",
             "soft_Recall@3": "mean",
-            "soft_NDCG@5": "mean",
             "n_truth_in_corpus": "sum",
         }
         for col in ("relevance_int", "completeness_int"):
@@ -1390,7 +1379,7 @@ def _write_multi_excel(rows_df: pd.DataFrame, out_path: Path) -> None:
             "query_length", "year_is_multi", "n_retrieved", "n_unique_sections",
             "enhance_query_flag", "use_tiered_years", "section_alpha",
             "relevance_int", "completeness_int",
-            "evidence_hit", "soft_MRR", "soft_Recall@3", "soft_NDCG@5",
+            "evidence_hit", "soft_MRR", "soft_Recall@3",
         ] if c in df.columns]
         corr_df = df[corr_cols].apply(pd.to_numeric, errors="coerce").corr()
         corr_df.to_excel(writer, sheet_name="correlations")
@@ -1403,7 +1392,7 @@ def _write_multi_excel(rows_df: pd.DataFrame, out_path: Path) -> None:
         dim_axes    = [c for c in ["level", "mode", "section_alpha", "enhance_query_flag", "use_tiered_years"] if c in df.columns]
         metric_cols = [c for c in [
             "evidence_hit", "word_recall", "num_recall",
-            "soft_MRR", "soft_Recall@3", "soft_NDCG@5",
+            "soft_MRR", "soft_Recall@3",
             "relevance_int", "completeness_int",
         ] if c in df.columns]
         dim_frames = []
@@ -1601,7 +1590,6 @@ _CMP_METRICS: list[tuple[str, str, str]] = [
     ("num_recall",           "num_rec", ".3f"),
     ("soft_MRR",             "sft_MRR", ".3f"),
     ("soft_Recall@3",        "R@3",     ".3f"),
-    ("soft_NDCG@5",          "NDCG@5",  ".3f"),
     ("relevance_int",        "rel",     ".3f"),
     ("completeness_int",     "cmp",     ".3f"),
 ]
@@ -1819,7 +1807,7 @@ def _print_baseline_delta_summary(df: pd.DataFrame) -> None:
 # Sheets 8 & 9: cross-tabulate config axes (and retrieved SEC sections) against
 # query categories to reveal which categories benefit from each axis change.
 #
-# Metrics: evidence_hit, word_recall, num_recall, soft_MRR, soft_NDCG@5, soft_Recall@3
+# Metrics: evidence_hit, word_recall, num_recall, soft_MRR, soft_Recall@3
 # Δ column: binary axes → signed (other − baseline); 3-value axes → max − min range.
 
 _AX_CAT_METRICS: list[tuple[str, str]] = [
@@ -1827,7 +1815,6 @@ _AX_CAT_METRICS: list[tuple[str, str]] = [
     ("word_recall",   "wrd_rec"),
     ("num_recall",    "num_rec"),
     ("soft_MRR",      "sft_MRR"),
-    ("soft_NDCG@5",   "NDCG@5"),
     ("soft_Recall@3", "R@3"),
 ]
 
