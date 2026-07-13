@@ -124,6 +124,15 @@ def chat_batch(messages_list, model, max_tokens, base_url=None, extra_body=None)
     Mirrors the contract of mlx_lm.batch_generate as this codebase uses it: a list of
     prompts in, a list of completed texts out, same order. Concurrency replaces MLX's
     single batched forward pass -- vLLM does the actual batching server-side.
+
+    Per-prompt failures are isolated. One prompt that the server refuses -- typically a
+    context longer than --max-model-len, which is a permanent property of that prompt and
+    not of the server -- used to raise out of the whole batch. Since callers batch a
+    question's configs together, a single oversized context wiped out every config for that
+    question. Such a prompt now yields "" while its siblings still return.
+
+    A batch in which EVERY prompt fails still raises: that is the signature of a dead
+    backend, and the caller's consecutive-failure guard needs to see it.
     """
     if not messages_list:
         return []
@@ -133,7 +142,25 @@ def chat_batch(messages_list, model, max_tokens, base_url=None, extra_body=None)
             pool.submit(_post_chat, m, model, max_tokens, base_url, extra_body)
             for m in messages_list
         ]
-        return [f.result() for f in futures]
+        texts, errors = [], []
+        for i, f in enumerate(futures):
+            try:
+                texts.append(f.result())
+            except Exception as e:
+                errors.append(f"[{i}] {e}")
+                texts.append("")
+
+    if errors and len(errors) == len(messages_list):
+        raise LLMBackendError(
+            f"all {len(errors)} request(s) in the batch failed -- backend is down.\n  "
+            + "\n  ".join(errors[:3])
+        )
+    if errors:
+        print(f"      [gen] {len(errors)}/{len(messages_list)} prompt(s) rejected by the "
+              f"server (answer left empty):")
+        for e in errors[:3]:
+            print(f"        {e[:160]}")
+    return texts
 
 
 # Qwen3.5 emits a long plain-text reasoning preamble unless thinking is disabled, the

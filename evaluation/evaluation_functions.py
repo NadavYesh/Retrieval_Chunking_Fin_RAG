@@ -5,17 +5,24 @@ For each result row we check whether the retrieved context contains enough
 of the ground-truth evidence passage to count as a "hit".  Because chunking
 can split a passage, we use two soft signals:
 
-  word_recall  – fraction of evidence word-tokens that appear anywhere in
-                 the context (≥ 0.50 → hit).
-  num_recall   – fraction of numeric tokens in the evidence that appear in
+  word_recall  – fraction of the evidence's content words (stopwords removed)
+                 that appear anywhere in the context (≥ 0.50 → hit).
+  num_recall   – fraction of the evidence's *salient* numbers that appear in
                  the context (≥ 0.70 → hit).  Numbers are the load-bearing
                  tokens in financial text, so this catches cases where
                  surrounding prose differs but the figures are present.
+                 Only computed when the evidence carries at least
+                 MIN_SALIENT_NUMS of them — see salient_numbers().
 
 evidence_hit = word_recall >= 0.50  OR  num_recall >= 0.70
 
 When FinDER supplies multiple reference passages we compute the metrics for
 each and keep the best (most generous) match.
+
+This module owns the tokenizers for the whole evaluation stage — evaluation_run.py
+imports them rather than defining its own, so the numeric/word notion of "overlap"
+cannot drift between the merged-context metrics here and the per-chunk soft
+relevance metrics there.
 """
 
 import re
@@ -23,35 +30,78 @@ from typing import Union
 import pandas as pd
 
 
-# ── helpers ──────────────────────────────────────────────────────────────────
-## SET BUILDERS
-def _tokens(text: str) -> set[str]:
-    """Lowercase alphabetic/numeric tokens, strip punctuation.
-    motivation: check word overlap, not sentene=ces. 
-    """
-    return set(re.findall(r"[a-z0-9,.\-]+", text.lower()))
+# ── tokenizers ────────────────────────────────────────────────────────────────
 
-#print(_tokens('heloo, my name is "nada;v" '))
+# The leading \d is load-bearing: a character class of [\d,] alone also matches a
+# bare "," , which made every comma in ordinary prose register as a "number". Truth
+# passages without figures then had the number-set {","}, which any chunk in the
+# corpus trivially covers, so num_recall was 1.0 (and evidence_hit unconditionally
+# True) for every narrative question.
+_NUM_RE = re.compile(r"-?\d[\d,]*(?:\.\d+)?")
+
+# A bare 4-digit year is not evidence: it is a filing-wide constant repeated in the
+# header of nearly every chunk of the document, so matching on it says nothing about
+# whether a chunk carries the passage's actual figures.
+_YEAR_RE = re.compile(r"^(?:19|20)\d{2}$")
+
+# Content words only (≥3 letters). Numbers are deliberately excluded — they are
+# scored separately and far more precisely by the numeric leg.
+_WORD_RE = re.compile(r"[a-z][a-z\-]{2,}")
+
+# Financial-boilerplate + English function words. These appear in essentially every
+# 10-K chunk, so leaving them in inflates word_recall towards a high, uninformative floor.
+_STOPWORDS = frozenset("""
+the and for our are was were with that this from has have had not any all its their which
+such other than been will may can into under over more most upon also both each per
+company companies inc corporation business financial statements year years fiscal
+including include includes included related respectively approximately during
+""".split())
+
+# Minimum salient numbers a truth passage must carry before its numeric overlap is
+# trusted. Below this the denominator is so small that a single coincidental match
+# (one shared figure) scores ≥ 0.30 — measured false-positive rate against randomly
+# drawn chunks was ~85% at 1-3 numbers, versus ~4% at 6+. Mirrors MIN_CHUNK_NUMS in
+# evaluation_run.find_truth_chunks, which guards the same failure from the other side.
+MIN_SALIENT_NUMS = 4
+
 
 def _numbers(text: str) -> set[str]:
-    """Numeric tokens: integers, decimals, negatives, comma-formatted."""
-    return set(re.findall(r"-?[\d,]+\.?\d*", text))
+    """Numeric tokens: integers, decimals, negatives, comma-formatted. Digits required."""
+    return {m.strip(",") for m in _NUM_RE.findall(str(text))}
 
-## CALCULATING ON SETS
+
+def salient_numbers(text: str) -> set[str]:
+    """Numeric tokens minus bare years — the figures that actually identify a passage."""
+    return {n for n in _numbers(text) if not _YEAR_RE.match(n)}
+
+
+def _words(text: str) -> set[str]:
+    """Content words: ≥3 letters, lowercased, stopwords removed."""
+    return {w for w in _WORD_RE.findall(str(text).lower()) if w not in _STOPWORDS}
+
+
+# ── recall over a reference/context pair ──────────────────────────────────────
+
 def _word_recall(evidence: str, context: str) -> float:
-    ev_toks = _tokens(evidence)
+    """Fraction of the evidence's content words present anywhere in the context."""
+    ev_toks = _words(evidence)
     if not ev_toks:
         return 0.0
-    ctx_toks = _tokens(context)
-    return len(ev_toks & ctx_toks) / len(ev_toks) # sums all overlaps 
+    return len(ev_toks & _words(context)) / len(ev_toks)
 
 
 def _num_recall(evidence: str, context: str) -> float:
-    ev_nums = _numbers(evidence)
-    if not ev_nums:
+    """
+    Fraction of the evidence's salient numbers present in the context.
+
+    Returns 0.0 when the evidence carries fewer than MIN_SALIENT_NUMS of them: the
+    ratio is not measuring anything at that point, and letting it through would fire
+    evidence_hit's num_recall >= 0.70 leg on coincidence alone.
+    """
+    ev_nums = salient_numbers(evidence)
+    if len(ev_nums) < MIN_SALIENT_NUMS:
         return 0.0
-    ctx_nums = _numbers(context)
-    return len(ev_nums & ctx_nums) / len(ev_nums)
+    return len(ev_nums & salient_numbers(context)) / len(ev_nums)
 
 
 # ── per-row scoring ───────────────────────────────────────────────────────────

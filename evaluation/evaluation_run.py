@@ -5,9 +5,10 @@ RAG evaluation analysis: retrieval statistics, truth-chunk corpus lookup, genera
 Retrieval metrics:
 
   soft_MRR / soft_Recall@3
-      Per-chunk soft relevance: max(number_overlap, text_similarity) vs truth passages,
-      threshold 0.30 for binary. Gives credit for "right neighbourhood" retrievals where
-      chunk boundaries don't align with FinDER passages. Available for every row.
+      Per-chunk soft relevance: max(salient_number_overlap, content_word_recall) vs truth
+      passages, thresholded at SOFT_RELEVANCE_THRESH for binary. Gives credit for "right
+      neighbourhood" retrievals where chunk boundaries don't align with FinDER passages.
+      Available for every row.
 
   evidence_hit / word_recall / num_recall
       Lexical coverage of truth passages over the full merged retrieved context.
@@ -41,14 +42,20 @@ import openpyxl
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).parent))
-from evaluation_functions import score_row
+from evaluation_functions import (
+    MIN_SALIENT_NUMS,
+    _numbers,
+    _words,
+    salient_numbers,
+    score_row,
+)
 
 CHUNKS_DIR = Path("/Users/nadavsmacbookair/Desktop/Thesis/data/financial_corpora/chunks/hierarchical/indexed-at-07-07-26/header")
 
 FINGERPRINT_LEN       = 200    # chars of normalised text used as a fast exact-match key in fp_index
 FUZZY_THRESH          = 0.80   # SequenceMatcher ratio needed to declare a fuzzy truth-chunk match
 NUM_CONTAINMENT_THRESH = 0.85  # fraction of chunk's numbers that must appear in the truth ref
-MIN_CHUNK_NUMS        = 4      # minimum distinct numbers a chunk must have to qualify for number-containment
+MIN_CHUNK_NUMS        = 4      # minimum distinct salient numbers a chunk must have to qualify for number-containment
 
 
 # ── Corpus loading ────────────────────────────────────────────────────────────
@@ -58,23 +65,29 @@ def _norm(text: str) -> str:
     return re.sub(r"\s+", " ", str(text).strip()).lower()
 
 
-_NUM_RE = re.compile(r"-?[\d,]+\.?\d*")
-
-def _numbers(text: str) -> set[str]:
-    """Extract distinctive numeric tokens (integers, decimals, comma-formatted)."""
-    return set(_NUM_RE.findall(text))
-
-
-SOFT_RELEVANCE_THRESH = 0.30  # minimum overlap score to label a chunk as soft-relevant
+# Calibrated against a null model rather than picked by eye: scoring randomly drawn
+# corpus chunks against the truth passages, 0.50 labels 1.6% of them relevant (0.30
+# labels 4.6%), so a retriever returning junk scores a soft_MRR of ~0.03 instead of
+# being handed credit it did not earn.
+SOFT_RELEVANCE_THRESH = 0.50  # minimum overlap score to label a chunk as soft-relevant
 
 
 def chunk_relevance(chunk_text: str, truth_passages: list[str]) -> float:
     """
     Soft relevance score [0, 1] for a single retrieved chunk vs the truth passages.
 
-    Score = max over truth passages of max(num_overlap, text_similarity) where:
-      num_overlap = |chunk_nums ∩ truth_nums| / |truth_nums|  (truth coverage direction)
-      text_similarity = SequenceMatcher ratio on first 500 chars
+    Score = max over truth passages of max(num_overlap, word_recall) where:
+      num_overlap = |chunk_nums ∩ truth_nums| / |truth_nums|, over *salient* numbers
+                    (years dropped) and only when the truth passage carries at least
+                    MIN_SALIENT_NUMS of them — otherwise 0.0, leaving the word leg to
+                    decide. See evaluation_functions._num_recall for why.
+      word_recall = |chunk_words ∩ truth_words| / |truth_words|, over content words
+                    (stopwords removed) across the whole chunk.
+
+    word_recall rather than a SequenceMatcher character ratio because FinDER's truth
+    passages are tab-delimited while the corpus stores markdown pipe tables: the same
+    facts, differently punctuated. Character-level similarity mostly measures that
+    formatting gap, and comparing set membership over content words does not.
 
     A graded score, not an exact chunk-ID match, on purpose: FinDER's evidence text
     sometimes marks an omitted continuation with a literal "<text>...<text>" placeholder,
@@ -84,13 +97,18 @@ def chunk_relevance(chunk_text: str, truth_passages: list[str]) -> float:
     one-to-one truth-chunk match impractical (see thesis, Experimental Setup
     Section~sec:retrieval-metrics).
     """
-    chunk_nums = _numbers(chunk_text)
+    chunk_nums  = salient_numbers(chunk_text)
+    chunk_words = _words(chunk_text)
     best = 0.0
     for truth in truth_passages:
-        truth_nums = _numbers(truth)
-        num_overlap = len(chunk_nums & truth_nums) / len(truth_nums) if truth_nums else 0.0
-        text_sim    = SequenceMatcher(None, _norm(chunk_text)[:500], _norm(truth)[:500]).ratio()
-        best = max(best, num_overlap, text_sim)
+        truth_nums = salient_numbers(truth)
+        num_overlap = (
+            len(chunk_nums & truth_nums) / len(truth_nums)
+            if len(truth_nums) >= MIN_SALIENT_NUMS else 0.0
+        )
+        truth_words = _words(truth)
+        word_recall = len(chunk_words & truth_words) / len(truth_words) if truth_words else 0.0
+        best = max(best, num_overlap, word_recall)
     return best
 
 
@@ -177,10 +195,11 @@ def find_truth_chunks(truth_text: str, corpus: pd.DataFrame, fp_index: dict[str,
       Finds chunks where the text format happens to align (non-table sections).
 
     Step 2 — Number-containment scan (format-agnostic, works for financial tables):
-      Extracts the numeric tokens from the truth passage and from each corpus chunk.
-      A chunk is "contained" if ≥ NUM_CONTAINMENT_THRESH of its numbers appear in the
-      truth ref AND it has at least MIN_CHUNK_NUMS distinct numbers (to avoid spurious
-      matches from chunks that only contain year values like 2023/2024).
+      Extracts the salient numbers (figures, years excluded) from the truth passage and
+      from each corpus chunk. A chunk is "contained" if ≥ NUM_CONTAINMENT_THRESH of its
+      numbers appear in the truth ref AND it has at least MIN_CHUNK_NUMS distinct ones.
+      Excluding years is what stops a chunk matching purely because it and the truth ref
+      both mention 2023/2024, which every chunk of the filing does.
 
     Returns a deduplicated list of chunk UUIDs. Empty list if nothing matches.
     """
@@ -204,10 +223,10 @@ def find_truth_chunks(truth_text: str, corpus: pd.DataFrame, fp_index: dict[str,
                 break
 
     # ── Step 2: number-containment scan ──
-    truth_nums = _numbers(truth_text)
+    truth_nums = salient_numbers(truth_text)
     if truth_nums:
         for _, row in corpus.iterrows():
-            chunk_nums = _numbers(row["text"])
+            chunk_nums = salient_numbers(row["text"])
             if len(chunk_nums) < MIN_CHUNK_NUMS:
                 continue
             containment = len(chunk_nums & truth_nums) / len(chunk_nums)
@@ -529,7 +548,7 @@ def analyze_entry(idx: str, data: dict, corpus: pd.DataFrame, fp_index: dict,
         ),
 
         # ─── Soft retrieval metrics (Tier 1 — all rows) ───────────────────────
-        # Per-chunk relevance = max(num_overlap, text_sim) vs truth passages, threshold 0.30.
+        # Per-chunk relevance = max(salient num_overlap, content word_recall), threshold 0.50.
         # Gives credit for "right neighbourhood" retrievals where the exact chunk boundary
         # doesn't match the FinDER passage. Available for every row (no corpus dependency).
         # soft_MRR      — 1/rank of the first soft-relevant chunk; 0 if none in top-k
