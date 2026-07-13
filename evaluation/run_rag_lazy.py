@@ -166,6 +166,12 @@ def run_multi_evaluation_lazy(
     all_rows: list[dict] = []
     ts = datetime.now().strftime("%Y%m%d_%H%M")
 
+    # Abort after this many questions in a row fail to generate. One failure can be a
+    # transient blip (llm_backend already retries 5x with backoff internally); several in
+    # a row means the backend is gone, and continuing just fills the output with "".
+    MAX_CONSECUTIVE_GEN_FAILURES = 3
+    consecutive_gen_failures = 0
+
     # ── Checkpointing ──────────────────────────────────────────────────────────
     # out_path is fixed up front (not just computed at the end) so every question's
     # checkpoint write lands at the same, final path. Write-then-rename makes each
@@ -432,8 +438,22 @@ def run_multi_evaluation_lazy(
                         shared_note = f" ({n_shared} configs share this)" if n_shared > 1 else ""
                         print(f"      [gen] {len(answer)} chars{shared_note}: {answer[:160].strip()}...")
                         rag_answers[retrieval_key] = answer
+                    consecutive_gen_failures = 0
                 except Exception as e:
-                    print(f"      [ERROR] {e}")
+                    # A dead generation backend used to be silent: every later question
+                    # wrote "" and the run finished with a full-sized file of empty
+                    # answers. Tolerate a blip, but abort once it is clearly not a blip --
+                    # the checkpoint on disk stays valid up to the last good question.
+                    consecutive_gen_failures += 1
+                    print(f"      [ERROR] generation failed ({consecutive_gen_failures} "
+                          f"question(s) in a row): {e}")
+                    if consecutive_gen_failures >= MAX_CONSECUTIVE_GEN_FAILURES:
+                        _checkpoint()
+                        raise RuntimeError(
+                            f"Generation failed on {consecutive_gen_failures} consecutive "
+                            f"questions -- the backend is down. Aborting instead of writing "
+                            f"empty answers.\nCheckpoint with the good rows: {out_path}"
+                        ) from e
                     for retrieval_key in batch_keys:
                         rag_answers[retrieval_key] = ""
 
