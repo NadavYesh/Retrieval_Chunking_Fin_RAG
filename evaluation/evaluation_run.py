@@ -2107,10 +2107,14 @@ def main():
     #print("Experimental run with coverage = 0.60 instead of .30")
     USE_LLM_JUDGE = True
 
+    # Point these at the JSON(s) run_rag_lazy.py wrote. Checked up front: a missing path
+    # here used to surface as a confusing failure deep inside the analysis instead.
     eval_files = [
         "/Users/nadavsmacbookair/Desktop/Thesis/data/eval_results/ready_for_analysis/eval_multi_mdlz_ma_yum_newmont_iff.json",
-        
     ]
+    missing = [f for f in eval_files if not Path(f).exists()]
+    if missing:
+        raise SystemExit("eval_files not found:\n  " + "\n  ".join(missing))
 
     print(f"Corpus dir: {CHUNKS_DIR}")
     corpus, fp_index, corpus_text_map = load_corpus()

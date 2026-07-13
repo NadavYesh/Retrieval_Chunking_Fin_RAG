@@ -173,7 +173,6 @@ def extract_metadata_batch(
         metas.append(meta)
 
     return metas
-print(extract_metadata_batch(["nadav likes a really nice computer made by apple"]))
 
 
 def embed_query_batch(queries: list[str], embed_model, embed_tokenizer) -> list[list[float]]:

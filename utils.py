@@ -300,4 +300,3 @@ def extract_ticker_deterministic(query: str):
         if pattern.search(norm_query):
             return _ticker_alias_to_symbol[alias].lower()
     return extract_ticker_hint(query)
-print(extract_ticker_deterministic("nadav likes to drive tesla a microsoft COST in 2022-2024"))

@@ -184,7 +184,8 @@ def run_multi_evaluation_lazy(
     # Resume support: skip already-completed questions (0-indexed) for tickers whose
     # prior run was interrupted mid-way -- e.g. {"tsla": 5} resumes tsla at question 5
     # (i.e. questions[5:]) while every other ticker still runs from question 0.
-    RESUME_FROM = {"yum": 2}
+    # MUST be empty for a full run: a stale entry here silently drops questions.
+    RESUME_FROM: dict[str, int] = {}
 
     ticker_groups: dict[tuple, list[tuple[int, dict]]] = defaultdict(list)
     for i, cfg in enumerate(configs):
@@ -520,20 +521,21 @@ def write_config(
 
 if __name__ == "__main__":
     from mlx_lm import load
-    # tickers test: "ko","wmt","jpm"
-    # load parquet FinDER with enhanced queries.
     dataset, _ = load_dataset(DATASET_PATH)
     if dataset.empty:
         raise SystemExit(f"Dataset not found at {DATASET_PATH}. Run build_evaluation_dataset.py first.")
 
     LEVELS = [1, 2, 3]
+    # Questions come from the precomputed dataset, not from a live FinDER read, so this
+    # list only selects which of the dataset's tickers to sweep -- it cannot introduce a
+    # question the dataset has no lookup for. These are every ticker in the dataset except
+    # "walmart", which is a stray alias row (build_evaluation_dataset keyed one question
+    # under the company name instead of "wmt") and is deliberately left out.
+    TICKERS = ["aapl", "nvda", "pypl", "tsla", "jpm", "ko",
+               "mdlz", "ma", "yum", "nem", "iff"]
     configs = [
-        #write_config(tickers=["pypl"], levels=LEVELS, retrieval_modes=["hybrid","sparse"], enhance_query_flag = [True, False], section_alpha = [0 ,1]),
-        #write_config(tickers=["tsla"], levels=LEVELS, retrieval_modes=["hybrid","dense","sparse"], enhance_query_flag = [True, False], section_alpha = [0 ,1]),
-        # write_config(tickers=["tsla"], levels=[1], retrieval_modes=["sparse"], enhance_query_flag = [False], section_alpha = [0,1]),
-        # write_config(tickers=["tsla","pypl","aapl","nvda"], levels=LEVELS, retrieval_modes=["sparse","dense","hybrid"], enhance_query_flag = [True,False], section_alpha = [0,1]),
-        write_config(tickers=["yum","nem","iff"], levels=LEVELS, retrieval_modes=["sparse","dense","hybrid"], enhance_query_flag = [True,False], section_alpha = [0,1]),
-    
+        write_config(tickers=TICKERS, levels=LEVELS, retrieval_modes=["sparse","dense","hybrid"],
+                     enhance_query_flag=[True, False], section_alpha=[0, 1]),
     ]
     print(f"Running {len(configs)} configs...")
 

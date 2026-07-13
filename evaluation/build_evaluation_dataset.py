@@ -164,7 +164,13 @@ if __name__ == "__main__":
     from mlx_lm import load
     from mlx_embeddings.utils import load as emb_load
 
-    tickers = ["mdlz","mondelez","ma","mastercard","yum","nem","newmont","iff"]
+    # Canonical ticker symbols only -- these are the keys run_rag_lazy._lookup matches on.
+    # Company-name aliases ("mondelez", "walmart", ...) must NOT go here: build_dataset
+    # stores each row under the exact string passed, so an alias creates rows keyed
+    # "mondelez" that the runner, iterating tickers, will never find.
+    # Existing (finder_id, ticker) pairs are not recomputed, so re-running only backfills.
+    tickers = ["aapl", "nvda", "pypl", "tsla", "jpm", "ko",
+               "mdlz", "ma", "yum", "nem", "iff"]
 
     print("Loading generation model...")
     gen_model, gen_tokenizer = load("mlx-community/Qwen3.5-9B-OptiQ-4bit")
