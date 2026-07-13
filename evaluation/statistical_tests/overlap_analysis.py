@@ -10,8 +10,17 @@ computed downstream can distinguish them.
 IDENTITY IS ALWAYS ORDERED. Two runs collapse only if they return the same chunk IDs
 in the same positions. Comparing unordered sets instead inflates every count -- 193
 groups and 645 runs rather than 172 and 501 -- because it treats a re-ranking of the
-same five chunks as no change. soft_MRR and soft_Recall@3 both react to re-ranking,
-so the ordered definition is the one that matches the metrics.
+same five chunks as no change.
+
+The retrieval metric no longer justifies that choice: soft_Recall@5 is a set-membership
+test at the retrieval depth, so it is invariant to re-ranking (soft_MRR and soft_Recall@3,
+which did react to it, were dropped as rank-variant -- the parent-fetch configs collapse
+child hits onto their parents through a set, so chunk positions are arbitrary). The
+GENERATOR is what keeps identity ordered: it is handed the chunks as a numbered
+"Source Number i" list, so two runs with the same five chunks in different positions can
+still produce different answers and different judge verdicts. Ordered identity is
+therefore the conservative definition -- it never merges two runs the judge could
+distinguish.
 
 TWO DIFFERENT "OVERLAP RATES". They answer different questions and differ by ~14pp:
 
