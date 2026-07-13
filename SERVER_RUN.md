@@ -81,7 +81,7 @@ export LLM_API_BASE=http://<host>:8000/v1
 export LLM_JUDGE_API_BASE=http://<host>:8001/v1
 export LLM_GEN_MODEL=cyankiwi/Qwen3.5-9B-AWQ-4bit
 export LLM_JUDGE_MODEL=RedHatAI/phi-4-quantized.w4a16
-export LLM_CONCURRENCY=32
+export LLM_CONCURRENCY=40
 
 python -m llm_backend                  # health check: both endpoints, expected model ids
 python evaluation/run_rag_lazy.py      # 121 questions x 36 configs = 4,356 runs
@@ -103,3 +103,27 @@ emits a long plain-text reasoning preamble with no `<think>` tag to strip.
 ~4,150 generation calls (16.3M in / 2.6M out) and ~4,270 judge calls (6.1M in / 1.3M out).
 On one H100 with vLLM that is roughly 40 minutes of GPU work; budget an hour, so about
 $2–3 at typical rental rates. Bandwidth is negligible (~65MB of prompt text total).
+
+## Batching
+
+Generation is dispatched **once per question**: `run_rag_lazy` collapses the 36 configs down
+to the unique retrievals for that question (configs fetching identical chunks are
+de-duplicated) and sends them as one `chat_batch` call. Measured on the AAPL/NVDA/PYPL/TSLA
+run, that batch is mean 26.6, median 28, max 36 requests.
+
+`LLM_CONCURRENCY=40` is sized to that: the largest question fits in a single wave. At the
+old default of 32, ~15% of questions spilled a few stragglers into a second wave and the
+whole question blocked on them with the GPU mostly idle. Raising it past 40 buys nothing —
+no question ever exceeds 36.
+
+Server-side batching needs no tuning: vLLM's continuous batching absorbs the 40 in-flight
+requests on its own, and the defaults for `--max-num-seqs` are far above that.
+
+The `completion_batch_size` / `prefill_batch_size` arguments still passed at the
+`generate_llm_answers_batch` call site are MLX-only (they cap KV caches on Metal) and are
+inert on the API path.
+
+Known inefficiency, deliberately not fixed: the GPU idles while the Mac does retrieval for
+the next question (Qdrant + BM25 + fusion, a second or two), because questions are processed
+strictly in sequence. Pipelining retrieval against generation would recover that, but it
+complicates the checkpoint-per-question crash-safety for a few percent of an hour-long run.

@@ -52,7 +52,11 @@ JUDGE_MODEL    = os.getenv("LLM_JUDGE_MODEL", "RedHatAI/phi-4-quantized.w4a16")
 JUDGE_API_BASE = os.getenv("LLM_JUDGE_API_BASE", API_BASE).rstrip("/")
 
 # vLLM batches server-side; this only caps how many requests are in flight at once.
-CONCURRENCY = int(os.getenv("LLM_CONCURRENCY", "32"))
+# run_rag_lazy generates once per question, sending that question's unique retrievals as
+# one chat_batch call -- measured at mean 26.6, max 36 (the 36 configs de-duplicate down).
+# 40 fits the largest question in a single wave. At 32, ~15% of questions spilled 2-4
+# stragglers into a second wave and the whole question blocked on them with the GPU idle.
+CONCURRENCY = int(os.getenv("LLM_CONCURRENCY", "40"))
 TIMEOUT     = int(os.getenv("LLM_TIMEOUT", "600"))
 MAX_RETRIES = 5
 
