@@ -44,6 +44,9 @@ import openpyxl
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).parent))
+# Repo root too: llm_backend / prompts / utils live there, and running this file directly
+# only puts evaluation/ on the path.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from evaluation_functions import (
     MIN_SALIENT_NUMS,
     _numbers,
@@ -2127,9 +2130,7 @@ def main():
     # Point these at the JSON(s) run_rag_lazy.py wrote. Checked up front: a missing path
     # here used to surface as a confusing failure deep inside the analysis instead.
     eval_files = [
-        "/Users/nadavsmacbookair/Desktop/Thesis/data/eval_results/"
-        "eval_multi_AAPL-IFF-JPM-KO-MA-MDLZ-NEM-NVDA-PYPL-TSLA-YUM_20260713_2132_clean.json",
-    ]
+        "/Users/nadavsmacbookair/Desktop/Thesis/data/eval_results/eval_multi_AAPL-IFF-JPM-KO-MA-MDLZ-NEM-NVDA-PYPL-TSLA-YUM_20260713_2132_clean.json"    ]
     missing = [f for f in eval_files if not Path(f).exists()]
     if missing:
         raise SystemExit("eval_files not found:\n  " + "\n  ".join(missing))
