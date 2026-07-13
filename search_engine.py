@@ -376,9 +376,13 @@ def _build_rag_prompt(user_query, search_results, tokenizer):
         {"role": "user", "content": f"Context:\n{context_text}\n\n Question: {user_query}"}
     ]
 
+    if tokenizer is None:          # API backend: the server applies the chat template
+        return messages, context_chunks
+
     # enable_thinking=False: with it on, this model burns thousands of tokens on a
     # plain-text reasoning preamble (no <think> tag to strip it by) before ever
-    # emitting an answer - ~15x slower for an equivalent final answer.
+    # emitting an answer - ~15x slower for an equivalent final answer. The API path
+    # sets the same switch via llm_backend.QWEN_NO_THINK.
     prompt = tokenizer.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True, enable_thinking=False
     )
@@ -425,17 +429,27 @@ def generate_llm_answers_batch(
     BatchGenerator, which otherwise defaults to 32/8 -- that many prompts'
     KV caches held concurrently is what was OOM-ing. Lowering these caps how
     many sequences run at once (trading throughput for a lower memory
-    ceiling) rather than how many prompts are logically in the batch.
+    ceiling) rather than how many prompts are logically in the batch. They are
+    inert on the API backend, where vLLM does its own batching.
+
+    With LLM_BACKEND=api, `model`/`tokenizer` are ignored and the prompts go to the
+    remote OpenAI-compatible server instead (see llm_backend). The batch is dispatched
+    concurrently rather than as one forward pass, but the contract is identical: one
+    (answer_text, context_chunks) tuple per item, in the order of `items`.
     """
-    from mlx_lm import batch_generate
+    import llm_backend
 
     results = [None] * len(items)
-    batch_prompts  = []
-    batch_chunks   = []
+    batch_prompts   = []
+    batch_chunks    = []
     batch_positions = []
 
+    # tokenizer=None on the API path -> _build_rag_prompt returns `messages`, and the
+    # server applies the chat template itself.
+    tok = None if llm_backend.USE_API else tokenizer
+
     for i, (user_query, search_results) in enumerate(items):
-        prompt, context_chunks = _build_rag_prompt(user_query, search_results, tokenizer)
+        prompt, context_chunks = _build_rag_prompt(user_query, search_results, tok)
         if prompt is None:
             results[i] = ("No relevant information found in the database to answer your query.", [])
         else:
@@ -444,12 +458,19 @@ def generate_llm_answers_batch(
             batch_positions.append(i)
 
     if batch_prompts:
-        token_prompts = [_encode_for_batch(tokenizer, p) for p in batch_prompts]
-        batch = batch_generate(
-            model, tokenizer, token_prompts, max_tokens=max_tokens, verbose=False,
-            completion_batch_size=completion_batch_size, prefill_batch_size=prefill_batch_size,
-        )
-        for pos, text, chunks in zip(batch_positions, batch.texts, batch_chunks):
+        if llm_backend.USE_API:
+            texts = llm_backend.chat_batch(
+                batch_prompts, llm_backend.GEN_MODEL, max_tokens,
+                extra_body=llm_backend.QWEN_NO_THINK,
+            )
+        else:
+            from mlx_lm import batch_generate
+            token_prompts = [_encode_for_batch(tokenizer, p) for p in batch_prompts]
+            texts = batch_generate(
+                model, tokenizer, token_prompts, max_tokens=max_tokens, verbose=False,
+                completion_batch_size=completion_batch_size, prefill_batch_size=prefill_batch_size,
+            ).texts
+        for pos, text, chunks in zip(batch_positions, texts, batch_chunks):
             results[pos] = (text.strip(), chunks)
 
     return results

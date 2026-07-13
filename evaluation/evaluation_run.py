@@ -983,14 +983,14 @@ def judge_llm_batch(
     """
     sys.path.append(str(Path(__file__).resolve().parent.parent))
     from prompts import JUDGE_PROMPT
-    from mlx_lm import batch_generate
+    import llm_backend
 
     swaps = [
         _should_swap(question, truth_answer, rag_answer, baseline_answer)
         for question, truth_answer, rag_answer, baseline_answer in items
     ]
 
-    prompts_text = []
+    messages_list = []
     for (question, truth_answer, rag_answer, baseline_answer), swapped in zip(items, swaps):
         prompt_text = JUDGE_PROMPT.format(
             question=question,
@@ -998,21 +998,27 @@ def judge_llm_batch(
             answer_a=baseline_answer if swapped else rag_answer,
             answer_b=rag_answer if swapped else baseline_answer,
         )
-        messages = [{"role": "user", "content": prompt_text}]
-        prompts_text.append(
-            tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        messages_list.append([{"role": "user", "content": prompt_text}])
+
+    if llm_backend.USE_API:
+        # The judge runs on its own endpoint/model id; no thinking switch, Phi-4 has none.
+        texts = llm_backend.chat_batch(
+            messages_list, llm_backend.JUDGE_MODEL, max_tokens,
+            base_url=llm_backend.JUDGE_API_BASE,
         )
+    else:
+        from mlx_lm import batch_generate
+        token_prompts = []
+        for messages in messages_list:
+            p = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+            add_special = tokenizer.bos_token is None or not p.startswith(tokenizer.bos_token)
+            token_prompts.append(tokenizer.encode(p, add_special_tokens=add_special))
+        texts = batch_generate(
+            model, tokenizer, token_prompts, max_tokens=max_tokens, verbose=True,
+            completion_batch_size=completion_batch_size, prefill_batch_size=prefill_batch_size,
+        ).texts
 
-    token_prompts = []
-    for p in prompts_text:
-        add_special = tokenizer.bos_token is None or not p.startswith(tokenizer.bos_token)
-        token_prompts.append(tokenizer.encode(p, add_special_tokens=add_special))
-
-    batch = batch_generate(
-        model, tokenizer, token_prompts, max_tokens=max_tokens, verbose=True,
-        completion_batch_size=completion_batch_size, prefill_batch_size=prefill_batch_size,
-    )
-    results = [_parse_judge_response(response) for response in batch.texts]
+    results = [_parse_judge_response(response) for response in texts]
     for result, swapped in zip(results, swaps):
         if swapped:
             result["relevance"]    = _unswap_verdict(result["relevance"])
@@ -2122,9 +2128,18 @@ def main():
 
     judge_model, judge_tok = None, None
     if USE_LLM_JUDGE:
-        from mlx_lm import load as mlx_load
-        print("\nLoading Phi-4 judge model…")
-        judge_model, judge_tok = mlx_load("mlx-community/phi-4-4bit")
+        import llm_backend
+        if llm_backend.USE_API:
+            # Judge runs remotely. REMOTE_MODEL keeps the "judge_model is not None"
+            # gates satisfied; judge_llm_batch routes to the API and never touches it.
+            # Verify the endpoint up front, not 4,000 requests into the sweep.
+            print(f"\nJudge via API: {llm_backend.JUDGE_MODEL} @ {llm_backend.JUDGE_API_BASE}")
+            print(llm_backend.health_check())
+            judge_model, judge_tok = llm_backend.REMOTE_MODEL, None
+        else:
+            from mlx_lm import load as mlx_load
+            print("\nLoading Phi-4 judge model…")
+            judge_model, judge_tok = mlx_load("mlx-community/phi-4-4bit")
 
     for i, ef in enumerate(eval_files):
         print(f"\n{'='*60}\nBatch {i+1}/{len(eval_files)}: {Path(ef).name}\n{'='*60}")

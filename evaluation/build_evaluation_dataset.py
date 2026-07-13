@@ -161,8 +161,9 @@ def build_dataset(
 
 
 if __name__ == "__main__":
-    from mlx_lm import load
     from mlx_embeddings.utils import load as emb_load
+
+    import llm_backend
 
     # Canonical ticker symbols only -- these are the keys run_rag_lazy._lookup matches on.
     # Company-name aliases ("mondelez", "walmart", ...) must NOT go here: build_dataset
@@ -172,8 +173,18 @@ if __name__ == "__main__":
     tickers = ["aapl", "nvda", "pypl", "tsla", "jpm", "ko",
                "mdlz", "ma", "yum", "nem", "iff"]
 
-    print("Loading generation model...")
-    gen_model, gen_tokenizer = load("mlx-community/Qwen3.5-9B-OptiQ-4bit")
+    if llm_backend.USE_API:
+        # Query enhancement goes to the server; embeddings stay local (embeddinggemma
+        # is 300M and its vectors must stay identical to what is already in Qdrant --
+        # re-embedding on a different runtime would invalidate the existing index).
+        print(f"Query enhancement via API: {llm_backend.GEN_MODEL} @ {llm_backend.API_BASE}")
+        print(llm_backend.health_check())
+        gen_model, gen_tokenizer = llm_backend.REMOTE_MODEL, None
+    else:
+        from mlx_lm import load
+        print("Loading generation model...")
+        gen_model, gen_tokenizer = load("mlx-community/Qwen3.5-9B-OptiQ-4bit")
+
     print("Loading embedding model...")
     embed_model, embed_tokenizer = emb_load("mlx-community/embeddinggemma-300m-bf16")
 

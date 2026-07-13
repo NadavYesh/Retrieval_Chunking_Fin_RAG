@@ -26,6 +26,7 @@ from search_engine import (
 from evaluation.section_routing import make_section_filter, section_fuse
 from evaluation.build_evaluation_dataset import load_dataset, DATASET_PATH
 
+import llm_backend
 from db.database import get_qdrant_client
 
 # Keyed by the meaningful choice (chunking level 1/2/3), not by the verbose
@@ -407,11 +408,15 @@ def run_multi_evaluation_lazy(
             batch_keys:  list[tuple] = []
             batch_items: list[tuple] = []
 
+            # On the API backend gen_model is None by design (the model lives on the
+            # server), so "no model" can't be the test for whether to generate.
+            can_generate = llm_backend.USE_API or gen_model is not None
+
             for retrieval_key in group_keys:
                 context_points = overlap_groups[retrieval_key][0]["context_points"]
                 if not context_points:
                     rag_answers[retrieval_key] = "No relevant context retrieved."
-                elif not gen_model:
+                elif not can_generate:
                     rag_answers[retrieval_key] = " NO GENERATED ANSWER "
                 else:
                     batch_keys.append(retrieval_key)
@@ -520,7 +525,7 @@ def write_config(
 
 
 if __name__ == "__main__":
-    from mlx_lm import load
+    import llm_backend
     dataset, _ = load_dataset(DATASET_PATH)
     if dataset.empty:
         raise SystemExit(f"Dataset not found at {DATASET_PATH}. Run build_evaluation_dataset.py first.")
@@ -539,9 +544,17 @@ if __name__ == "__main__":
     ]
     print(f"Running {len(configs)} configs...")
 
-    print("Loading generation model...")
-    gen_model, gen_tokenizer = load("mlx-community/Qwen3.5-9B-OptiQ-4bit")
-    #gen_model, gen_tokenizer = None,None
+    if llm_backend.USE_API:
+        # Remote generation: nothing to load locally. Fail here if the server is not
+        # actually serving the expected model, rather than 4,000 requests into the sweep.
+        print(f"Generation via API: {llm_backend.GEN_MODEL} @ {llm_backend.API_BASE}")
+        print(llm_backend.health_check())
+        gen_model, gen_tokenizer = None, None
+    else:
+        from mlx_lm import load
+        print("Loading generation model...")
+        gen_model, gen_tokenizer = load("mlx-community/Qwen3.5-9B-OptiQ-4bit")
+
     for cfg in configs:
         run_multi_evaluation_lazy(
             configs=cfg,

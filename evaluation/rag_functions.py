@@ -72,11 +72,15 @@ def _encode_for_batch(tokenizer, prompt_text: str) -> list:
     return tokenizer.encode(prompt_text, add_special_tokens=add_special)
 
 
-def _chat_prompt(tokenizer, system: str, user: str) -> str:
+def _chat_prompt(tokenizer, system: str, user: str):
+    """Chat-templated string for MLX; the raw `messages` list for the API backend,
+    where the server applies the template itself (tokenizer is None there)."""
     messages = [
         {"role": "system", "content": system},
         {"role": "user",   "content": user},
     ]
+    if tokenizer is None:
+        return messages
     return tokenizer.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True, enable_thinking=False
     )
@@ -93,8 +97,17 @@ def _batch_generate_texts(
     BatchGenerator, which otherwise defaults to 32/8 -- that many prompts'
     KV caches held concurrently is what OOMs on a single Metal GPU. Lowering
     them caps how many sequences run at once, not how many prompts are
-    logically in the batch.
+    logically in the batch. They are inert on the API backend, where vLLM batches
+    server-side and `prompts_text` is a list of `messages` lists rather than strings.
     """
+    import llm_backend
+
+    if llm_backend.USE_API:
+        return llm_backend.chat_batch(
+            prompts_text, llm_backend.GEN_MODEL, max_tokens,
+            extra_body=llm_backend.QWEN_NO_THINK,
+        )
+
     from mlx_lm import batch_generate
 
     token_prompts = [_encode_for_batch(tokenizer, p) for p in prompts_text]
@@ -123,7 +136,9 @@ def enhance_query_batch(
     if not queries:
         return []
 
-    prompts = [_chat_prompt(tokenizer, QUERY_ENHANCEMENT_PROMPT, q) for q in queries]
+    import llm_backend
+    tok     = None if llm_backend.USE_API else tokenizer
+    prompts = [_chat_prompt(tok, QUERY_ENHANCEMENT_PROMPT, q) for q in queries]
     results: list[str | None] = [None] * len(queries)
     pending = list(range(len(queries)))
 
