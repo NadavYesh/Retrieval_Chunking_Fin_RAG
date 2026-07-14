@@ -25,8 +25,9 @@ cannot drift between the merged-context metrics here and the per-chunk soft
 relevance metrics there.
 """
 
+import random
 import re
-from typing import Union
+from typing import Callable, Union
 import pandas as pd
 
 
@@ -151,6 +152,90 @@ def score_row(
     return {"word_recall": round(best_word, 4),
             "num_recall":  round(best_num,  4),
             "evidence_hit": hit}
+
+
+# ── relevance-threshold calibration ───────────────────────────────────────────
+# Thresholds swept in the thesis (Experimental Setup, Table relevance-threshold).
+CALIBRATION_THRESHOLDS = (0.30, 0.40, 0.50, 0.60, 0.70)
+
+
+def calibrate_relevance_threshold(
+    rows: list[tuple[list[str], list[str]]],
+    corpus_text_map: dict[str, str],
+    relevance_fn: Callable[[str, list[str]], float],
+    thresholds: tuple[float, ...] = CALIBRATION_THRESHOLDS,
+    seed: int = 0,
+) -> pd.DataFrame:
+    """
+    Calibrate the soft-relevance threshold against a random-chunk null model.
+
+    The soft retrieval metrics label a chunk relevant when relevance_fn(chunk, truth)
+    clears a threshold. That threshold is not chosen for leniency but for the point at
+    which the metric's NOISE FLOOR — how often it fires on chunks that were never
+    retrieved — is near zero while most genuinely retrieved chunks still clear it. This
+    function produces the sweep behind that choice (the thesis Table).
+
+    For every (truth_refs, retrieved_ids) row it scores each retrieved chunk against
+    that row's truth passages, and, as the null, scores an equal number of chunks drawn
+    uniformly at random from corpus_text_map against the SAME passages. At each
+    threshold it reports the fraction of each pool labelled relevant: the random column
+    is the false-positive floor (want it low), the retrieved column is the signal
+    retained (want it high). The gap between them is what the threshold trades off.
+
+    relevance_fn is injected rather than imported (evaluation_run.chunk_relevance is the
+    production scorer) so this module stays free of a circular import and the same sweep
+    can be run against any candidate scorer.
+
+    Parameters
+    ----------
+    rows : list of (truth_refs, retrieved_ids)
+        One entry per evaluated query/config. truth_refs are the FinDER ground-truth
+        passages; retrieved_ids index into corpus_text_map. Rows with no truth_refs or
+        no retrieved_ids are skipped.
+    corpus_text_map : dict[chunk_id -> text]
+        The same id→text lookup the soft metrics resolve against; also the pool the
+        random null is drawn from.
+    relevance_fn : (chunk_text, truth_refs) -> float
+        Graded relevance scorer under test (e.g. evaluation_run.chunk_relevance).
+    thresholds : tuple[float, ...]
+        Cut-offs to sweep.
+    seed : int
+        Seeds the random-null draw, so the table is reproducible.
+
+    Returns
+    -------
+    pd.DataFrame indexed by threshold with columns:
+        random_labelled    — fraction of random chunks scored >= threshold (noise floor)
+        retrieved_labelled — fraction of retrieved chunks scored >= threshold (signal)
+        n_random, n_retrieved — pool sizes the fractions are over.
+    """
+    rng = random.Random(seed)
+    all_ids = list(corpus_text_map)
+
+    retrieved_scores: list[float] = []
+    random_scores: list[float] = []
+    for truth_refs, retrieved_ids in rows:
+        if not truth_refs or not retrieved_ids:
+            continue
+        for cid in retrieved_ids:
+            retrieved_scores.append(relevance_fn(corpus_text_map.get(cid, ""), truth_refs))
+        # Match the random-draw count to this row's retrieval depth so the two pools are
+        # comparable per row, not just in aggregate.
+        for cid in rng.sample(all_ids, min(len(retrieved_ids), len(all_ids))):
+            random_scores.append(relevance_fn(corpus_text_map[cid], truth_refs))
+
+    ret = pd.Series(retrieved_scores, dtype=float)
+    rnd = pd.Series(random_scores, dtype=float)
+    table = pd.DataFrame(
+        {
+            "random_labelled":    [float((rnd >= t).mean()) for t in thresholds],
+            "retrieved_labelled": [float((ret >= t).mean()) for t in thresholds],
+        },
+        index=pd.Index(thresholds, name="threshold"),
+    )
+    table["n_random"] = len(rnd)
+    table["n_retrieved"] = len(ret)
+    return table
 
 
 # ── dataframe-level evaluation ────────────────────────────────────────────────

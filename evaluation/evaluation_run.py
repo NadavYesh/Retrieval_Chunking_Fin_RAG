@@ -4,13 +4,13 @@ RAG evaluation analysis: retrieval statistics, truth-chunk corpus lookup, genera
 
 Retrieval metrics:
 
-  soft_MRR / soft_Recall@5
+  soft_MRR / soft_Recall@3
       Per-chunk soft relevance: max(salient_number_overlap, content_word_recall) vs truth
       passages, thresholded at SOFT_RELEVANCE_THRESH for binary. Gives credit for "right
       neighbourhood" retrievals where chunk boundaries don't align with FinDER passages.
-      Available for every row. soft_Recall@5 is set-based (rank-invariant): does any
-      retrieved chunk clear the threshold. soft_MRR additionally rewards ranking the
-      relevant chunk first.
+      Available for every row. soft_Recall@3 asks whether any of the top 3 retrieved
+      chunks clears the threshold; soft_MRR additionally rewards ranking the relevant
+      chunk first.
 
   evidence_hit / word_recall / num_recall
       Lexical coverage of truth passages over the full merged retrieved context.
@@ -121,7 +121,7 @@ def soft_retrieval_metrics(
     retrieved_ids: list[str],
     corpus_text_map: dict[str, str],
     truth_refs: list[str],
-    k_values: tuple = (5,),
+    k_values: tuple = (3,),
 ) -> dict:
     """
     Compute soft retrieval metrics using per-chunk relevance scoring.
@@ -134,9 +134,11 @@ def soft_retrieval_metrics(
     chunk_relevance(), and thresholded at SOFT_RELEVANCE_THRESH to a binary
     relevant/not-relevant label before MRR/Recall@k are applied as usual.
 
-    k defaults to the retrieval depth (5), which makes soft_Recall@5 a pure set
-    membership test over the retrieved chunks — rank-invariant, unlike soft_MRR,
-    which additionally rewards placing the relevant chunk first.
+    k defaults to 3, below the retrieval depth of 5: a chunk surfacing only at rank 4
+    or 5 does not count. Recall@k is therefore NOT rank-invariant here — it is a
+    set-membership test over the top-k prefix, and cutting k below the depth is what
+    makes it sensitive to ranking. soft_MRR grades that ranking more finely, by the
+    reciprocal rank of the first hit rather than a cutoff.
     """
     rel_scores = [
         chunk_relevance(corpus_text_map.get(cid, ""), truth_refs)
@@ -364,7 +366,7 @@ def analyze_entry(idx: str, data: dict, corpus: pd.DataFrame, fp_index: dict,
     n_truth_retrieved                — how many were actually in the retrieved top-k list
     best_truth_rank                  — 1-based rank of the highest-placed truth chunk (None if missed)
     truth_chunk_ids                  — corpus UUIDs (or 'NOT_IN_CORPUS')
-    soft_MRR, soft_Recall@5 — per-chunk soft relevance metrics (all rows)
+    soft_MRR, soft_Recall@3 — per-chunk soft relevance metrics (all rows)
     word_recall, num_recall          — token-level overlap between truth passages and retrieved context
     evidence_hit                     — True if word_recall ≥ 0.50 OR num_recall ≥ 0.70
     pitfalls                         — comma-separated flags: WRONG_YEAR,
@@ -483,7 +485,7 @@ def analyze_entry(idx: str, data: dict, corpus: pd.DataFrame, fp_index: dict,
     if corpus_text_map is not None and truth_refs:
         soft_metrics = soft_retrieval_metrics(retrieved_ids, corpus_text_map, truth_refs)
     else:
-        soft_metrics = {"soft_MRR": None, "soft_Recall@5": None}
+        soft_metrics = {"soft_MRR": None, "soft_Recall@3": None}
 
     # ── Pitfall flags ──────────────────────────────────────────────────────────
     pitfalls = []
@@ -561,7 +563,7 @@ def analyze_entry(idx: str, data: dict, corpus: pd.DataFrame, fp_index: dict,
         # Gives credit for "right neighbourhood" retrievals where the exact chunk boundary
         # doesn't match the FinDER passage. Available for every row (no corpus dependency).
         # soft_MRR      — 1/rank of the first soft-relevant chunk; 0 if none retrieved
-        # soft_Recall@5 — ≥1 soft-relevant chunk among the 5 retrieved (binary)
+        # soft_Recall@3 — ≥1 soft-relevant chunk in the top 3 of the 5 retrieved (binary)
         **soft_metrics,
 
         # ─── Merged-context lexical coverage ──────────────────────────────────
@@ -1363,7 +1365,7 @@ def _write_multi_excel(rows_df: pd.DataFrame, out_path: Path) -> None:
             "word_recall": "mean",
             "num_recall": "mean",
             "soft_MRR": "mean",
-            "soft_Recall@5": "mean",
+            "soft_Recall@3": "mean",
             "n_truth_in_corpus": "sum",
         }
         for col in ("relevance_int", "completeness_int"):
@@ -1383,7 +1385,7 @@ def _write_multi_excel(rows_df: pd.DataFrame, out_path: Path) -> None:
         # ── Sheet 3: category_breakdown ─────────────────────────────────────
         cat_cols = ["category", group_col]
         cat_agg: dict = {"finder_id": "count", "evidence_hit": "mean",
-                         "soft_Recall@5": "mean"}
+                         "soft_Recall@3": "mean"}
         for col in ("relevance_int", "completeness_int"):
             if col in df.columns:
                 cat_agg[col] = "mean"
@@ -1407,7 +1409,7 @@ def _write_multi_excel(rows_df: pd.DataFrame, out_path: Path) -> None:
             "query_length", "year_is_multi", "n_retrieved", "n_unique_sections",
             "enhance_query_flag", "use_tiered_years", "section_alpha",
             "relevance_int", "completeness_int",
-            "evidence_hit", "soft_MRR", "soft_Recall@5",
+            "evidence_hit", "soft_MRR", "soft_Recall@3",
         ] if c in df.columns]
         corr_df = df[corr_cols].apply(pd.to_numeric, errors="coerce").corr()
         corr_df.to_excel(writer, sheet_name="correlations")
@@ -1420,7 +1422,7 @@ def _write_multi_excel(rows_df: pd.DataFrame, out_path: Path) -> None:
         dim_axes    = [c for c in ["level", "mode", "section_alpha", "enhance_query_flag", "use_tiered_years"] if c in df.columns]
         metric_cols = [c for c in [
             "evidence_hit", "word_recall", "num_recall",
-            "soft_MRR", "soft_Recall@5",
+            "soft_MRR", "soft_Recall@3",
             "relevance_int", "completeness_int",
         ] if c in df.columns]
         dim_frames = []
@@ -1561,7 +1563,7 @@ def _print_multi_summary(df: pd.DataFrame) -> None:
     print("═" * 80)
     print(f"Total rows: {n}  |  Configs: {df[group_col].nunique()}")
 
-    for col in ("evidence_hit", "soft_Recall@5"):
+    for col in ("evidence_hit", "soft_Recall@3"):
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
     # "_int" = 1.0 when rag_answer (A) beat baseline_answer (B), 0.0 when B won,
@@ -1571,7 +1573,7 @@ def _print_multi_summary(df: pd.DataFrame) -> None:
             df[col + "_int"] = df[col].map({"A": 1.0, "B": 0.0})
 
     agg: dict = {"finder_id": "count", "evidence_hit": "mean", "word_recall": "mean",
-                 "num_recall": "mean", "soft_Recall@5": "mean"}
+                 "num_recall": "mean", "soft_Recall@3": "mean"}
     for c in ("relevance_int", "completeness_int"):
         if c in df.columns:
             agg[c] = "mean"
@@ -1580,16 +1582,16 @@ def _print_multi_summary(df: pd.DataFrame) -> None:
     sort_col = "relevance_int" if "relevance_int" in ranked else "evidence_hit"
     ranked = ranked.sort_values(sort_col, ascending=False)
 
-    print(f"\n{'config_key':<55} {'n':>4}  {'rel_win%':>8}  {'cmp_win%':>9}  {'Recall@5':>8}  {'evi_hit%':>8}  {'word_rec':>8}  {'num_rec':>7}")
+    print(f"\n{'config_key':<55} {'n':>4}  {'rel_win%':>8}  {'cmp_win%':>9}  {'Recall@3':>8}  {'evi_hit%':>8}  {'word_rec':>8}  {'num_rec':>7}")
     print("─" * 115)
     for _, r in ranked.iterrows():
         rel  = f"{r.get('relevance_int', float('nan'))*100:.1f}" if "relevance_int" in r and pd.notna(r.get("relevance_int")) else "  n/a"
         comp = f"{r.get('completeness_int', float('nan'))*100:.1f}" if "completeness_int" in r and pd.notna(r.get("completeness_int")) else "  n/a"
-        rc5  = f"{r.get('soft_Recall@5', float('nan')):.3f}" if pd.notna(r.get("soft_Recall@5")) else "  n/a"
+        rc3  = f"{r.get('soft_Recall@3', float('nan')):.3f}" if pd.notna(r.get("soft_Recall@3")) else "  n/a"
         hit  = f"{r['evidence_hit']*100:.1f}" if pd.notna(r.get("evidence_hit")) else "  n/a"
         wr   = f"{r['word_recall']:.3f}" if pd.notna(r.get("word_recall")) else "  n/a"
         nr   = f"{r['num_recall']:.3f}" if pd.notna(r.get("num_recall")) else "  n/a"
-        print(f"  {str(r[group_col]):<53} {int(r['n']):>4}  {rel:>8}  {comp:>9}  {rc5:>8}  {hit:>8}  {wr:>8}  {nr:>7}")
+        print(f"  {str(r[group_col]):<53} {int(r['n']):>4}  {rel:>8}  {comp:>9}  {rc3:>8}  {hit:>8}  {wr:>8}  {nr:>7}")
 
     if "category" in df.columns and "relevance" in df.columns:
         fail = df[df["relevance"] == "B"]
@@ -1616,7 +1618,7 @@ _CMP_METRICS: list[tuple[str, str, str]] = [
     ("word_recall",          "wrd_rec", ".3f"),
     ("num_recall",           "num_rec", ".3f"),
     ("soft_MRR",             "sft_MRR", ".3f"),
-    ("soft_Recall@5",        "R@5",     ".3f"),
+    ("soft_Recall@3",        "R@3",     ".3f"),
     ("relevance_int",        "rel",     ".3f"),
     ("completeness_int",     "cmp",     ".3f"),
 ]
@@ -1677,7 +1679,7 @@ def _build_delta_df(df: pd.DataFrame, group_col: str) -> tuple[pd.DataFrame, str
         rows.append(rec)
 
     result   = pd.DataFrame(rows)
-    sort_col = next((c for c in ["relevance_int", "evidence_hit", "soft_Recall@5"] if c in result.columns), None)
+    sort_col = next((c for c in ["relevance_int", "evidence_hit", "soft_Recall@3"] if c in result.columns), None)
     if sort_col:
         result = result.sort_values(sort_col, ascending=False, ignore_index=True)
     return result, baseline_cfg
@@ -1834,7 +1836,7 @@ def _print_baseline_delta_summary(df: pd.DataFrame) -> None:
 # Sheets 8 & 9: cross-tabulate config axes (and retrieved SEC sections) against
 # query categories to reveal which categories benefit from each axis change.
 #
-# Metrics: evidence_hit, word_recall, num_recall, soft_MRR, soft_Recall@5
+# Metrics: evidence_hit, word_recall, num_recall, soft_MRR, soft_Recall@3
 # Δ column: binary axes → signed (other − baseline); 3-value axes → max − min range.
 
 _AX_CAT_METRICS: list[tuple[str, str]] = [
@@ -1842,7 +1844,7 @@ _AX_CAT_METRICS: list[tuple[str, str]] = [
     ("word_recall",   "wrd_rec"),
     ("num_recall",    "num_rec"),
     ("soft_MRR",      "sft_MRR"),
-    ("soft_Recall@5", "R@5"),
+    ("soft_Recall@3", "R@3"),
 ]
 
 # Baseline value per axis (normalised string, used to determine Δ direction)
@@ -2012,9 +2014,9 @@ def _write_section_routing_sheet(df: pd.DataFrame, writer: "pd.ExcelWriter") -> 
             n = len(sub_sec)
             rec[f"n_{sec}"]   = n
             rec[f"pct_{sec}"] = round(n / n_total * 100, 1) if n_total else None
-            if "soft_Recall@5" in df.columns:
-                rc5 = pd.to_numeric(sub_sec["soft_Recall@5"], errors="coerce").mean()
-                rec[f"recall5_{sec}"] = round(float(rc5), 3) if pd.notna(rc5) else None
+            if "soft_Recall@3" in df.columns:
+                rc3 = pd.to_numeric(sub_sec["soft_Recall@3"], errors="coerce").mean()
+                rec[f"recall3_{sec}"] = round(float(rc3), 3) if pd.notna(rc3) else None
 
         p1_rows.append(rec)
 
