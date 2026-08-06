@@ -1,7 +1,7 @@
 """
 Figures for the Results chapter.
 
-Reads judge_ordinal_scores.xlsx (the 34 x 36 grid carrying soft_Recall@5
+Reads judge_ordinal_scores.xlsx (the 34 x 36 grid carrying soft_Recall@3
 and the judged ordinal score) and writes vector PDFs to
 Master_Thesis_Tex/media/figs/.
 
@@ -65,9 +65,10 @@ mpl.rcParams.update({
 # arbitrary while parent-fetch collapsed level-2/3 child hits onto their level-1
 # parents through a set — but _collapse_to_parents now ranks parents by an RRF-sum
 # over their child ranks and re-sorts explicitly, so rank is well-defined at every
-# level. soft_Recall@5 remains the rank-invariant set-membership check.
+# level. soft_Recall@3 is the coarser check: a hit anywhere in the top 3 of the 5
+# retrieved chunks, so it reads rank too, but only through that cutoff.
 METRICS = {"ordinal": "Judged ordinal score",
-           "soft_Recall@5": "soft_Recall@5",
+           "soft_Recall@3": "soft_Recall@3",
            "soft_MRR": "soft_MRR"}
 
 
@@ -107,20 +108,20 @@ def summarise(df: pd.DataFrame, metric: str) -> pd.DataFrame:
 def fig_divergence(df: pd.DataFrame) -> None:
     d = df[df.alpha == 0]
     g = d.groupby(["config_key", "level", "mode"]).agg(
-        rec=("soft_Recall@5", "mean"), ordv=("ordinal", "mean")).reset_index()
+        rec=("soft_Recall@3", "mean"), ordv=("ordinal", "mean")).reset_index()
     base = g[g.config_key == BASELINE].iloc[0]
 
     fig, ax = plt.subplots(figsize=(5.6, 4.3))
     ax.grid(True, lw=0.6, zorder=0)
     ax.set_axisbelow(True)
 
-    # The baseline sits at 0.5 on the judge axis by construction; its soft_Recall@5
+    # The baseline sits at 0.5 on the judge axis by construction; its soft_Recall@3
     # is an empirical value. Both are reference lines, not data.
     ax.axhline(0.5, color=AXIS, lw=0.8, zorder=1)
     ax.axvline(base.rec, color=AXIS, lw=0.8, zorder=1)
-    ax.text(base.rec - 0.004, 0.30, "BM25 baseline soft_Recall@5", color=MUTED,
+    ax.text(base.rec - 0.004, 0.30, "BM25 baseline soft_Recall@3", color=MUTED,
             fontsize=7.5, ha="right", va="bottom", rotation=90)
-    # Axes-fraction x so this label stays put whatever range Recall@5 autoscales to.
+    # Axes-fraction x so this label stays put whatever range Recall@3 autoscales to.
     ax.text(0.98, 0.505, "judged tie with baseline", color=MUTED, fontsize=7.5,
             ha="right", va="bottom", transform=ax.get_yaxis_transform())
 
@@ -138,9 +139,9 @@ def fig_divergence(df: pd.DataFrame) -> None:
         ax.annotate(pretty(cfg), (r.rec + dx, r.ordv + dy), ha=ha, va="center",
                     fontsize=7.5, color=INK, zorder=4)
 
-    ax.set_xlabel("soft_Recall@5  (retrieval)")
+    ax.set_xlabel("soft_Recall@3  (retrieval)")
     ax.set_ylabel("Judged ordinal score  (answer quality)")
-    # x autoscales: Recall@5 does not live on the same range the old MRR axis was
+    # x autoscales: Recall@3 does not live on the same range the old MRR axis was
     # hand-tuned for. The annotation offsets above may need nudging once seen.
     ax.set_ylim(0.28, 0.80)
 
@@ -224,7 +225,7 @@ def fig_heatmap(df: pd.DataFrame) -> None:
 
     panels = [("ordinal", "Judged ordinal score", DIV_BR,
                TwoSlopeNorm(vmin=0.25, vcenter=0.5, vmax=0.75)),
-              ("soft_Recall@5", "soft_Recall@5", SEQ_BLUE,
+              ("soft_Recall@3", "soft_Recall@3", SEQ_BLUE,
                mpl.colors.Normalize(0.0, 1.0))]
 
     fig, axes = plt.subplots(1, 2, figsize=(7.0, 3.1))
@@ -261,12 +262,12 @@ def fig_heatmap(df: pd.DataFrame) -> None:
 
 # ── Figure 4: section routing, alpha=0 -> alpha=1 by category ────────────────
 def fig_routing(df: pd.DataFrame) -> None:
-    metrics = [("soft_Recall@5", "soft_Recall@5"), ("ordinal", "Judged ordinal")]
+    metrics = [("soft_Recall@3", "soft_Recall@3"), ("ordinal", "Judged ordinal")]
     g = df.groupby(["category", "alpha"])[[m for m, _ in metrics]].mean()
     nq = df.groupby("category")["query"].nunique()
 
-    # One shared category order across panels, by the headline Recall@5 effect.
-    delta = (g.xs(1, level="alpha")["soft_Recall@5"] - g.xs(0, level="alpha")["soft_Recall@5"])
+    # One shared category order across panels, by the headline Recall@3 effect.
+    delta = (g.xs(1, level="alpha")["soft_Recall@3"] - g.xs(0, level="alpha")["soft_Recall@3"])
     order = delta.sort_values(ascending=False).index.tolist()
     y = np.arange(len(order))[::-1]
 
@@ -300,7 +301,7 @@ def fig_routing(df: pd.DataFrame) -> None:
                Line2D([], [], color=CRIT, lw=1.6, label="routing degrades")]
     fig.legend(handles=handles, loc="lower center", ncol=3, bbox_to_anchor=(0.55, -0.03))
     fig.text(0.55, -0.085, "Arrow runs from $\\alpha$ = 0 to $\\alpha$ = 1. Categories ordered "
-             "by soft_Recall@5 effect.", ha="center", fontsize=7.5, color=MUTED)
+             "by soft_Recall@3 effect.", ha="center", fontsize=7.5, color=MUTED)
     fig.tight_layout()
     fig.savefig(OUT / "routing.pdf")
     plt.close(fig)

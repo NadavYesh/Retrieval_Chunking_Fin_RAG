@@ -5,3 +5,7 @@ drafts
 .DS_Store
 ~$*.xlsx
 db/move_points.log
+CLAUDE.md
+runpod.pub
+SERVER_RUN.md
+server_scripts

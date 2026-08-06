@@ -8,7 +8,7 @@ df = pd.read_excel(
 )
 
 metric_cols = ["Δ_word_recall", "Δ_num_recall",
-                "Δ_soft_Recall@5",
+                "Δ_soft_Recall@3",
                 ]
 values = df[metric_cols].to_numpy()
 

@@ -12,9 +12,10 @@ in the same positions. Comparing unordered sets instead inflates every count -- 
 groups and 645 runs rather than 172 and 501 -- because it treats a re-ranking of the
 same five chunks as no change.
 
-The retrieval metrics only partly justify that choice: soft_Recall@5 is a set-membership
-test at the retrieval depth, so it is invariant to re-ranking, though soft_MRR does react
-to it (and is meaningful to react to -- _collapse_to_parents ranks parents by an RRF-sum
+The retrieval metrics only partly justify that choice: soft_Recall@3 cuts at the top 3 of
+the 5 retrieved chunks, so it only sees a re-ranking that moves a relevant chunk across
+that cutoff, while soft_MRR reacts to any of them (and is meaningful to react to --
+_collapse_to_parents ranks parents by an RRF-sum
 over their child ranks rather than collapsing them through a set, so chunk positions are
 well-defined even for parent-fetch). The GENERATOR is what keeps identity ordered
 regardless: it is handed the chunks as a numbered
@@ -302,7 +303,8 @@ def cross_query_contexts(runs: pd.DataFrame) -> pd.DataFrame:
 
 
 def main() -> None:
-    workbook = Path(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_WORKBOOK
+    #workbook = Path(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_WORKBOOK
+    workbook = Path("/Users/nadavsmacbookair/Desktop/Thesis/data/eval_results/analysis/analysis_multi_AAPL-IFF-JPM-KO-MA-MDLZ-NEM-NVDA-PYPL-TSLA-YUM_20260713_2132_clean_dedup.xlsx")
     runs = load_runs(workbook)
 
     pd.set_option("display.width", 200)

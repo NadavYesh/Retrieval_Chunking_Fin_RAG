@@ -18,40 +18,41 @@ preference. Those four are not the same kind of thing, and the split matters:
   Structural -- no judgment was elicited, and none could have differed from a tie.
     same_as_baseline  the configuration's retrieved context, and therefore its
                       generated answer, was identical to the baseline's
-    is_baseline       the 34 rows of the baseline compared against itself
+    is_baseline       the rows of the baseline compared against itself
 
 Both groups score 0.5 under the ordinal scheme (win 1, tie 0.5, loss 0), over a
-fixed denominator of 34 queries. The distinction is reported because the
+denominator fixed at the full query count. The distinction is reported because the
 structural rows carry no information about the judge's behaviour, so the tie rate
 is quoted twice: once over all rows, once with them excluded. Scoring ties at 0.5
 rather than dropping them keeps the denominator fixed; a wins/(wins+losses) rate
-would score more than half the configurations on fewer than 34 comparisons.
+would score more than half the configurations on fewer than the full set of
+comparisons.
 
 Why no Bradley-Terry / Davidson model
   Those models exist to infer a ranking when comparisons form a connected graph
-  and A is never judged against C directly. This design is a STAR: all 35
-  configurations meet one common reference and never each other. Each
-  configuration's 34 comparisons against that reference are therefore already a
+  and A is never judged against C directly. This design is a STAR: every
+  configuration meets one common reference and never another configuration. Each
+  configuration's comparisons against that reference are therefore already a
   sufficient statistic for its strength, and a Davidson latent strength would be a
   monotone transform of the ordinal mean below -- it would reorder nothing. What
   the model would add (an interval scale, an explicit tie parameter) is not what
-  the ranking question needs, and with a 2.2% tie rate the tie parameter is nearly
-  degenerate. The statistical work is done instead by the tests below.
+  the ranking question needs, and with a tie rate this low the tie parameter is
+  nearly degenerate. The statistical work is done instead by the tests below.
 
 The tests
   PRIMARY -- separation of the top configuration from the runner-up. This is the
     test that licenses the phrase "the winner": ranking by a point estimate is
     free, but a unique winner exists only if rank 1 separates from rank 2.
     Wilcoxon signed-rank on the per-query ordinal difference. Pairing on query is
-    exact (both configurations answered all 34 queries), so the paired test is
-    available at no assumption cost, and it is the sharpest use of n = 34.
+    exact (every configuration answered every query), so the paired test is
+    available at no assumption cost, and it is the sharpest use of the sample.
   SUPPORTING -- each configuration against the baseline, same paired test,
-    Benjamini-Hochberg corrected across the 35 comparisons, since we are screening
-    for which configurations clear the reference rather than defending one claim.
+    Benjamini-Hochberg corrected across the family, since we are screening for
+    which configurations clear the reference rather than defending one claim.
   SUPPORTING -- a cluster bootstrap resampling QUERIES (the unit of independence;
-    the 36 configurations sharing a query are correlated), giving each
-    configuration a probability of being the best. This is what quantifies how
-    fragile the top of the ranking is to the particular 34 questions sampled.
+    the configurations sharing a query are correlated), giving each configuration a
+    probability of being the best. This is what quantifies how fragile the top of
+    the ranking is to the particular questions sampled.
 
 Usage:
     python judge_tie_breakdown.py [path/to/workbook.xlsx]
@@ -81,7 +82,6 @@ STRUCTURAL = ["same_as_baseline", "is_baseline"]
 TIES = INDIFFERENCE + STRUCTURAL
 
 BASELINE_KEY = "L1_BM25_PLAIN_A0"
-N_QUERIES = 34
 
 ORDINAL = {WIN: 1.0, LOSS: 0.0}  # every tie label falls through to 0.5
 TIE_SCORE = 0.5
@@ -144,7 +144,7 @@ def add_ordinal(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def query_by_config(df: pd.DataFrame, value: str = "ordinal") -> pd.DataFrame:
-    """34 x 36 matrix: one row per query, one column per configuration."""
+    """queries x configurations matrix: one row per query, one column per configuration."""
     wide = df.pivot_table(index="query", columns="config_key", values=value)
     if wide.isna().any().any():
         raise ValueError("every configuration must answer every query")
@@ -189,18 +189,43 @@ def config_summary(df: pd.DataFrame, workbook: Path) -> pd.DataFrame:
     retrieval = pd.read_excel(workbook, sheet_name="config_summary").set_index("config_key")
     keep = [
         "level", "mode", "enhance_query_flag", "section_alpha",
-        "soft_Recall@5", "word_recall", "num_recall",
+        "soft_Recall@3", "word_recall", "num_recall",
     ]
     summary = config_scores(df).join(retrieval[keep])
-    for metric in ("soft_Recall@5",):
+    for metric in ("soft_Recall@3",):
         summary[f"{metric}_rank"] = summary[metric].rank(ascending=False, method="min").astype(int)
     return summary
+
+
+def baseline_summary(comparisons: dict[str, dict]) -> pd.DataFrame:
+    """
+    The leader/pooled comparisons against the sparse baseline, one row per arm, for
+    the judge's ordinal score and each retrieval metric side by side. This is the
+    table the write-up quotes: SQ1 and SQ2 read off the same reference by the same
+    test, so their effect sizes and p-values are directly comparable.
+    """
+    rows = []
+    for metric, cmp in comparisons.items():
+        for arm, key in (("leader", "leader_vs_baseline"), ("pooled_top3", "pooled_vs_baseline")):
+            delta, p = cmp[key]
+            rows.append({
+                "metric": metric,
+                "arm": arm,
+                "configs": cmp["leader"] if arm == "leader" else ", ".join(cmp["top3"]),
+                "mean_delta": delta,
+                "p": p,
+                "significant": p < 0.05,
+            })
+    return pd.DataFrame(rows).set_index(["metric", "arm"])
 
 
 def write_workbook(path: Path, runs: pd.DataFrame, summary: pd.DataFrame,
                    verdicts: pd.DataFrame, ties: pd.DataFrame,
                    vs_base: pd.DataFrame, p_best: pd.Series,
-                   retrieval: dict[str, dict] | None = None) -> None:
+                   vs_base_pooled: pd.DataFrame | None = None,
+                   retrieval: dict[str, dict] | None = None,
+                   marginals: pd.DataFrame | None = None,
+                   marginals_alpha0: pd.DataFrame | None = None) -> None:
     """One sheet per artefact, so the whole judge (and retrieval) analysis travels as a single file."""
     with pd.ExcelWriter(path, engine="openpyxl") as xl:
         runs.to_excel(xl, sheet_name="runs_ordinal", index=False)
@@ -209,8 +234,14 @@ def write_workbook(path: Path, runs: pd.DataFrame, summary: pd.DataFrame,
         ties.to_excel(xl, sheet_name="tie_summary")
         vs_base.to_excel(xl, sheet_name="vs_baseline")
         p_best.rename("p_best").to_excel(xl, sheet_name="p_best")
+        if vs_base_pooled is not None:
+            vs_base_pooled.to_excel(xl, sheet_name="vs_baseline_leader_pooled")
+        if marginals is not None:
+            marginals.to_excel(xl, sheet_name="marginals")
+        if marginals_alpha0 is not None:
+            marginals_alpha0.to_excel(xl, sheet_name="marginals_alpha0")
         for metric, report in (retrieval or {}).items():
-            tag = metric.replace("soft_", "").replace("@", "")  # e.g. "soft_Recall@5" -> "Recall5"
+            tag = metric.replace("soft_", "").replace("@", "")  # e.g. "soft_Recall@3" -> "Recall3"
             report["scores"].rename(metric).to_excel(xl, sheet_name=f"retr_{tag}_scores")
             report["sep"]["table"].to_excel(xl, sheet_name=f"retr_{tag}_separation")
             report["p_best"].rename("p_best").to_excel(xl, sheet_name=f"retr_{tag}_bootstrap")
@@ -284,6 +315,48 @@ def pooled_vs_baseline(df: pd.DataFrame, winners: list[str], metric: str = "ordi
     return diff.mean(), p
 
 
+def baseline_comparisons(df: pd.DataFrame, wide: pd.DataFrame, scores: pd.DataFrame | pd.Series,
+                         metric: str = "ordinal") -> dict:
+    """
+    The two headline comparisons against the sparse baseline, at two levels of pooling.
+
+    LEADER -- the single top-ranked configuration against the baseline. The sharpest
+      claim available, and the most fragile: it is conditioned on which configuration
+      happened to come first, and the leading set shows that choice is usually not
+      supported by the data.
+    POOLED TOP THREE -- the top three configurations excluding the baseline, averaged
+      per query into one arm and then tested. Whenever the leaders are mutually
+      indistinguishable, this is the claim their tie actually licenses: that the
+      leading group clears the reference, not that any one member of it does.
+
+    Metric-agnostic, so the judge ordinal score and the retrieval metrics are put
+    through an identical procedure and their numbers are directly comparable.
+    """
+    leader = scores.index[0]
+    leader_delta, leader_p = paired_wilcoxon(wide, leader, BASELINE_KEY)
+
+    top3 = [c for c in scores.index if c != BASELINE_KEY][:TRIO_WINNERS]
+    pooled_delta, pooled_p = pooled_vs_baseline(df, top3, metric=metric)
+
+    return {
+        "leader": leader,
+        "leader_vs_baseline": (leader_delta, leader_p),
+        "top3": top3,
+        "pooled_vs_baseline": (pooled_delta, pooled_p),
+    }
+
+
+def print_baseline_comparisons(cmp: dict, indent: str = "  ") -> None:
+    """The leader/pooled block, printed identically for the judge and for retrieval."""
+    ld, lp = cmp["leader_vs_baseline"]
+    pd_, pp = cmp["pooled_vs_baseline"]
+    print(f"{indent}Against the sparse baseline ({BASELINE_KEY}):")
+    print(f"{indent}  leader {cmp['leader']}")
+    print(f"{indent}    vs. sparse baseline:                       delta={ld:+.4f}  p={lp:.4f}")
+    print(f"{indent}  pooled top three (excl. baseline): {', '.join(cmp['top3'])}")
+    print(f"{indent}    vs. sparse baseline:                       delta={pd_:+.4f}  p={pp:.4f}")
+
+
 def versus_baseline(wide: pd.DataFrame, scores: pd.DataFrame) -> pd.DataFrame:
     """Every configuration against the reference, BH-corrected across the family."""
     rows = []
@@ -304,8 +377,8 @@ def bootstrap_best(wide: pd.DataFrame, n_boot: int = N_BOOT) -> pd.Series:
         wide = n_configs X n_queries 
     P(configuration is best), resampling QUERIES with replacement.
 
-    The query is the unit of independence: the 36 configurations sharing a query
-    are correlated, so resampling runs would understate the uncertainty.
+    The query is the unit of independence: the configurations sharing a query are
+    correlated, so resampling runs would understate the uncertainty.
     """
     rng = np.random.default_rng(SEED)
     queries = wide.index.to_numpy()
@@ -363,12 +436,18 @@ def tie_agreement(df: pd.DataFrame) -> pd.DataFrame:
     )
 
 
+def n_queries(df: pd.DataFrame) -> int:
+    """The judged query count, read off the data rather than hard-coded."""
+    return int(df["query"].nunique())
+
+
 def decided_denominators(df: pd.DataFrame) -> pd.DataFrame:
     """
     Per-configuration count of decided comparisons, which is the denominator a
-    wins/(wins+losses) rate would use. Spread away from N_QUERIES is the bias the
-    ordinal scoring avoids. The baseline is excluded: it has no decided rows.
+    wins/(wins+losses) rate would use. Spread away from the full query count is the
+    bias the ordinal scoring avoids. The baseline is excluded: it has no decided rows.
     """
+    full = n_queries(df)
     rows = {}
     for m in METRICS:
         decided = df[df[m].isin([WIN, LOSS])].groupby("config_key").size()
@@ -378,7 +457,7 @@ def decided_denominators(df: pd.DataFrame) -> pd.DataFrame:
             "min": int(decided.min()),
             "max": int(decided.max()),
             "mean": decided.mean(),
-            f"at_full_{N_QUERIES}": int((decided == N_QUERIES).sum()),
+            f"at_full_{full}": int((decided == full).sum()),
         }
     return pd.DataFrame(rows)
 
@@ -400,10 +479,13 @@ def decided_denominators(df: pd.DataFrame) -> pd.DataFrame:
 # parent-fetch configs — level-2/3 child hits were collapsed onto their level-1
 # parents through a set, discarding the fused rank. _collapse_to_parents now ranks
 # parents by an RRF-sum over their child ranks, so the position of a retrieved chunk
-# is meaningful at every level and soft_MRR is reported alongside soft_Recall@5.
-RETRIEVAL_METRICS = ["soft_Recall@5", "soft_MRR"]
+# is meaningful at every level and soft_MRR is reported alongside soft_Recall@3.
+RETRIEVAL_METRICS = ["soft_Recall@3", "soft_MRR"]
 MARGINAL_MODES = ["hybrid", "dense"]
-MARGINAL_ALPHA = 0.0  # alpha=1 is treated as an ablation elsewhere, not a crossed factor
+# The factors marginalised over when a mode is compared against sparse: the sweep is
+# fully crossed, so each mode has the same 12 sub-configs (2 alphas x 2 enhancement
+# settings x 3 levels) and the pooled arms are balanced by construction.
+MARGINAL_FACTORS = ["section_alpha", "enhance_query_flag", "level"]
 
 
 def metric_scores(df: pd.DataFrame, metric: str) -> pd.Series:
@@ -411,20 +493,122 @@ def metric_scores(df: pd.DataFrame, metric: str) -> pd.Series:
     return df.groupby("config_key")[metric].mean().sort_values(ascending=False)
 
 
-def marginal_mode_vs_sparse(df: pd.DataFrame, metric: str, mode: str,
-                             alpha: float = MARGINAL_ALPHA) -> tuple[float, float]:
+def marginal_mode_vs_sparse(df: pd.DataFrame, metric: str, mode: str) -> tuple[float, float]:
     """
-    Paired Wilcoxon test, marginalising over chunking level and query enhancement:
-    every `mode` run at the given section_alpha vs. every sparse run at the same
-    alpha, averaged per query. This is the marginal read on SQ1 (hybrid/dense vs.
-    sparse) that does not depend on any single configuration being the leader.
+    Paired Wilcoxon test on the retrieval mode, marginalising over every other factor.
+
+    Each arm is one mode pooled over all of its sub-configurations -- section_alpha,
+    query enhancement and chunking level alike -- averaged per query, so `mode` is the
+    only thing that differs between the two arms. The sparse arm is therefore all 12
+    sparse runs, not the single BASELINE_KEY configuration: this is the marginal read
+    on SQ1 (hybrid/dense vs. sparse as retrieval strategies), which asks a coarser
+    question than the per-configuration tests and does not depend on any single
+    configuration being the leader.
     """
-    sub = df[df["section_alpha"] == alpha]
-    pivot = sub.pivot_table(index="query", columns="mode", values=metric, aggfunc="mean")
+    balance = df.groupby("mode")[MARGINAL_FACTORS].nunique()
+    if balance.nunique().gt(1).any():
+        raise ValueError(f"modes are not crossed over the same sub-configs:\n{balance}")
+
+    pivot = df.pivot_table(index="query", columns="mode", values=metric, aggfunc="mean")
     diff = pivot[mode] - pivot["sparse"]
     nonzero = diff[diff != 0]
     p = 1.0 if nonzero.empty else wilcoxon(nonzero).pvalue
     return diff.mean(), p
+
+
+# ── Marginal effects of the design axes ──────────────────────────────────────
+#
+# The per-configuration tests above cannot separate one cell of the grid from
+# another: 36 configurations over 108 queries leaves each cell estimated from too
+# little data, and the leading set runs most of the way down the ranking. The
+# design axes, however, are estimated from every run in the sweep -- each arm of a
+# contrast pools 12 or 18 configurations -- and that is the aggregation at which
+# the sweep has power. These are the numbers the write-up's SQ1 and SQ2 claims
+# rest on.
+#
+# Each contrast pools one arm over every OTHER axis, averages within a query, and
+# pairs on the query, exactly as marginal_mode_vs_sparse does for the mode axis.
+# The sweep is fully crossed, so the arms are balanced by construction; the
+# balance is asserted rather than assumed.
+#
+# Direction is always TREATMENT minus CONTROL, so a positive delta always means
+# "the thing being tested helped". For section routing that makes the contrast
+# alpha=1 - alpha=0 (routed minus unrouted), and its delta is negative: routing
+# hurts. Writing it the other way round would report a positive number for a
+# harmful treatment.
+ALL_METRICS = ["ordinal", *RETRIEVAL_METRICS]
+
+# (label, column, treatment values, control values)
+MARGINAL_CONTRASTS = [
+    ("hybrid - sparse",      "mode",               ["hybrid"], ["sparse"]),
+    ("dense - sparse",       "mode",               ["dense"],  ["sparse"]),
+    ("hybrid - dense",       "mode",               ["hybrid"], ["dense"]),
+    ("child (L2/L3) - L1",   "level",              [2, 3],     [1]),
+    ("L3 - L2",              "level",              [3],        [2]),
+    ("enhanced - plain",     "enhance_query_flag", [1],        [0]),
+    ("alpha=1 - alpha=0",    "section_alpha",      [1],        [0]),
+]
+
+# Every axis except the one under test; the arms are pooled over these.
+AXES = ["mode", "level", "enhance_query_flag", "section_alpha"]
+
+
+def marginal_contrast(df: pd.DataFrame, metric: str, column: str,
+                      treatment: list, control: list) -> tuple[float, float, float, float]:
+    """
+    One design axis, marginalised over the others, paired on query.
+
+    Both arms are pooled over every axis other than `column` and averaged within a
+    query, so `column` is the only systematic difference between them. Returns the
+    treatment and control means, their difference, and the signed-rank p-value.
+
+    This asks a coarser question than the per-configuration tests -- "does hybrid
+    retrieval help, over the whole sweep?" rather than "is this cell the best?" --
+    and it is the only question the sample size supports answering.
+    """
+    arms = {"treatment": treatment, "control": control}
+    others = [ax for ax in AXES if ax != column]
+
+    # The contrast is only interpretable if both arms span the same sub-configs on
+    # every other axis; otherwise the delta confounds `column` with whatever is
+    # unbalanced. Crossed sweep => this holds, but a dropped run would break it.
+    spans = {
+        arm: df[df[column].isin(values)].groupby(others).size().index
+        for arm, values in arms.items()
+    }
+    if set(spans["treatment"]) != set(spans["control"]):
+        raise ValueError(f"arms of '{column}' are not crossed over the same sub-configs")
+
+    means = {
+        arm: df[df[column].isin(values)].groupby("query")[metric].mean()
+        for arm, values in arms.items()
+    }
+    paired = pd.DataFrame(means).dropna()
+    diff = paired["treatment"] - paired["control"]
+    nonzero = diff[diff != 0]
+    p = 1.0 if nonzero.empty else wilcoxon(nonzero).pvalue
+    return paired["treatment"].mean(), paired["control"].mean(), diff.mean(), p
+
+
+def marginal_table(df: pd.DataFrame, metrics: list[str] = None,
+                   contrasts: list = None) -> pd.DataFrame:
+    """Every contrast against every metric: the table the write-up reports verbatim."""
+    metrics = metrics or ALL_METRICS
+    contrasts = contrasts or MARGINAL_CONTRASTS
+    rows = {}
+    for label, column, treatment, control in contrasts:
+        row = {}
+        for metric in metrics:
+            t, c, delta, p = marginal_contrast(df, metric, column, treatment, control)
+            row[(metric, "treat")] = t
+            row[(metric, "ctrl")] = c
+            row[(metric, "delta")] = delta
+            row[(metric, "p")] = p
+        rows[label] = row
+    out = pd.DataFrame(rows).T
+    out.columns = pd.MultiIndex.from_tuples(out.columns)
+    out.index.name = "contrast"
+    return out
 
 
 def retrieval_report(df: pd.DataFrame, metric: str) -> dict:
@@ -439,11 +623,7 @@ def retrieval_report(df: pd.DataFrame, metric: str) -> dict:
     sep = separation_test(wide, scores)
     p_best = bootstrap_best(wide)
 
-    leader = scores.index[0]
-    leader_delta, leader_p = paired_wilcoxon(wide, leader, BASELINE_KEY)
-
-    non_sparse_top3 = [c for c in scores.index if c != BASELINE_KEY][:TRIO_WINNERS]
-    pooled_delta, pooled_p = pooled_vs_baseline(df, non_sparse_top3, metric=metric)
+    cmp = baseline_comparisons(df, wide, scores, metric=metric)
 
     marginal = {
         mode: marginal_mode_vs_sparse(df, metric, mode) for mode in MARGINAL_MODES
@@ -453,15 +633,14 @@ def retrieval_report(df: pd.DataFrame, metric: str) -> dict:
         "scores": scores,
         "sep": sep,
         "p_best": p_best,
-        "non_sparse_top3": non_sparse_top3,
-        "leader_vs_baseline": (leader_delta, leader_p),
-        "pooled_vs_baseline": (pooled_delta, pooled_p),
+        "baseline": cmp,
         "marginal_vs_sparse": marginal,
     }
 
 
 def main() -> None:
     workbook = Path(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_WORKBOOK
+    workbook = Path("/Users/nadavsmacbookair/Desktop/Thesis/data/eval_results/analysis/analysis_multi_AAPL-IFF-JPM-KO-MA-MDLZ-NEM-NVDA-PYPL-TSLA-YUM_20260713_2132_clean_dedup.xlsx")
     df = add_ordinal(load_detail(workbook))
 
     print(f"{workbook.name}\n{len(df)} runs judged against baseline {BASELINE_KEY}\n")
@@ -475,7 +654,7 @@ def main() -> None:
     print("Tie agreement across the two dimensions")
     print(tie_agreement(df).to_string(), "\n")
 
-    print(f"Decided-comparison denominators per configuration (full = {N_QUERIES})")
+    print(f"Decided-comparison denominators per configuration (full = {n_queries(df)})")
     print(decided_denominators(df).round(1).to_string(), "\n")
 
     scores = config_summary(df, workbook)
@@ -484,7 +663,7 @@ def main() -> None:
 
     print("Configuration ranking by joint ordinal judge score")
     cols = ["rank", "n", "ordinal", "relevance", "completeness",
-            "soft_Recall@5_rank"]
+            "soft_Recall@3_rank"]
     print(scores.head(8)[cols].round(3).to_string())
     print(f"  ... baseline {BASELINE_KEY} scores {scores.loc[BASELINE_KEY, 'ordinal']:.3f} "
           f"at rank {scores.loc[BASELINE_KEY, 'rank']}")
@@ -519,10 +698,12 @@ def main() -> None:
 
 
 
-    # most valuable
-    delta, p = pooled_vs_baseline(df, sep["trio_winners"])
-    print(f"PRIMARY TEST -- {TRIO_WINNERS} best pooled vs baseline: "
-          f"mean gap {delta:+.3f}, p = {p:.4f}\n")
+    # most valuable -- the same two comparisons the retrieval metrics get below, so
+    # the judge's read on the baseline and SQ1's read on it are computed identically.
+    judge_cmp = baseline_comparisons(df, wide, scores)
+    print("PRIMARY TEST -- the judge's ordinal score against the sparse baseline")
+    print_baseline_comparisons(judge_cmp)
+    print()
 
     print("SUPPORTING -- configurations that clear the baseline (Benjamini–Hochberg-corrected)")
     vb = versus_baseline(wide, scores)
@@ -541,9 +722,9 @@ def main() -> None:
     print(f"  P(best is one of the {CO_WINNERS} co-winners) = "
           f"{p_best[sep['co_winners']].sum():.3f}")
 
-    # ── Retrieval metrics: same battery of tests, on soft_Recall@5 ──
+    # ── Retrieval metrics: same battery of tests, on soft_Recall@3 ──
     print("\n" + "=" * 70)
-    print("RETRIEVAL METRICS (soft_Recall@5) -- SQ1, same procedure as above")
+    print("RETRIEVAL METRICS (soft_Recall@3) -- SQ1, same procedure as above")
     print("=" * 70)
 
     retrieval_reports: dict[str, dict] = {}
@@ -565,18 +746,42 @@ def main() -> None:
         print(f"\n  P(best), {N_BOOT} query-cluster bootstraps:")
         print(r_p_best.head(6).round(3).to_string())
 
-        ld, lp = report["leader_vs_baseline"]
-        pdel, pp = report["pooled_vs_baseline"]
-        print(f"\n  Against the sparse baseline directly:")
-        print(f"    leader vs. sparse baseline:                  delta={ld:+.4f}  p={lp:.4f}")
-        print(f"    pooled top three (non-sparse) vs. baseline:  delta={pdel:+.4f}  p={pp:.4f}")
+        print()
+        print_baseline_comparisons(report["baseline"], indent="  ")
         for mode, (md, mp) in report["marginal_vs_sparse"].items():
-            print(f"    {mode:<6} vs. sparse (marginal, alpha={MARGINAL_ALPHA:.0f}):      "
+            print(f"    {mode:<6} vs. sparse (marginal over alpha/enhance/level):  "
                   f"delta={md:+.4f}  p={mp:.4f}")
+
+    pooled = baseline_summary(
+        {"judge_ordinal": judge_cmp}
+        | {m: r["baseline"] for m, r in retrieval_reports.items()}
+    )
+    print("\n" + "=" * 70)
+    print("LEADER / POOLED-TOP-3 vs SPARSE BASELINE -- judge and retrieval side by side")
+    print("=" * 70)
+    print(pooled.drop(columns="configs").round(4).to_string())
+
+    # ── Marginal effects: the aggregation the conclusions are drawn at ──
+    print("\n" + "=" * 70)
+    print("MARGINAL EFFECT OF EACH DESIGN AXIS (pooled over the other three)")
+    print("Direction is treatment - control: a positive delta means the treatment helped.")
+    print("=" * 70)
+    marginals = marginal_table(df)
+    print(marginals.round(4).to_string())
+
+    # The mode axis again, inside the alpha=0 arm only. alpha=1 is shown below to be
+    # both harmful and variance-destroying (it collapses the retrieval-mode signal),
+    # so pooling over it dilutes the mode contrast; alpha=0 is the operating regime.
+    alpha0 = df[df["section_alpha"] == 0]
+    mode_contrasts = [c for c in MARGINAL_CONTRASTS if c[1] == "mode"]
+    marginals_a0 = marginal_table(alpha0, contrasts=mode_contrasts)
+    print("\nRetrieval mode within alpha=0 only (the operating regime)")
+    print(marginals_a0.round(4).to_string())
 
     out_path = workbook.parent / OUT_NAME
     write_workbook(out_path, df, scores, verdict_table(df), tie_summary(df), vb, p_best,
-                   retrieval=retrieval_reports)
+                   vs_base_pooled=pooled, retrieval=retrieval_reports,
+                   marginals=marginals, marginals_alpha0=marginals_a0)
     print(f"\nJudge + retrieval analysis written to {out_path}")
 
 
