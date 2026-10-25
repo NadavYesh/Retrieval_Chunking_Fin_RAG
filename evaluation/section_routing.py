@@ -54,7 +54,16 @@ def make_section_filter(category: str) -> qdrant_models.Filter | None:
 
     Returns None when the category is unknown or has no mapping.
     """
-    target_items = CATEGORY_ITEMS.get((category or "").lower().strip())
+    return make_items_filter(CATEGORY_ITEMS.get((category or "").lower().strip(), frozenset()))
+
+
+def make_items_filter(target_items) -> qdrant_models.Filter | None:
+    """
+    Same filter for an explicit item set -- used by the predicted routers, whose
+    route can be the union of several categories' items (see section_classifier.Route).
+
+    Returns None for an empty item set.
+    """
     if not target_items:
         return None
 

@@ -107,3 +107,23 @@ After your brief rationale (2–4 sentences), output your decisions strictly in 
 
 You are reminded to output your decisions strictly in JSON format: {{"relevance": <A/B>, "completeness": <A/B>}}
 """
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Section-routing agent (evaluation/section_classifier.route_queries)
+# ─────────────────────────────────────────────────────────────────────────────
+SECTION_ROUTER_PROMPT = """\
+You route financial questions to the sections of a company's 10-K annual report where the answer is most likely found.
+
+A text classifier has already scored the question against FinDER question categories. Each candidate below lists the classifier's probability, the 10-K Items that category is searched in, and the words in the question that pushed the classifier toward it. The classifier is calibrated (p=0.70 is right about 70% of the time) and is right about {accuracy:.0%} of the time overall; its usual mistakes are footnotes vs. financials and governance vs. company overview.
+
+Your job: decide which candidate categories' Items the search should be restricted to.
+Rules:
+1. Choose ONE category when the question clearly belongs to it.
+2. Choose TWO or more when the answer plausibly spans their Items (e.g. a metric from the financial statements discussed in MD&A).
+3. Choose NONE (an empty list) when no candidate fits -- the search then runs over the whole filing, which is always safe. Restricting to the wrong Items hides the answer, so prefer NONE over a guess.
+4. You may only choose from the listed candidates.
+5. Judge by what the question asks about, not by company names or tickers.
+
+Output your choice and a short reason (at most 25 words), strictly as JSON, categories first:
+{{"categories": ["<candidate>", ...], "reason": "<short reason>"}}\
+"""

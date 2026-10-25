@@ -23,7 +23,8 @@ from search_engine import (
     search_with_payload, search_bm25, rrf_fuse, rrf_fuse_multi, generate_llm_answers_batch,
     search_dense_for_year, search_bm25_for_year,
 )
-from evaluation.section_routing import make_section_filter, section_fuse
+from evaluation.section_routing import make_items_filter, section_fuse
+from evaluation.section_classifier import Route, ROUTERS
 from evaluation.build_evaluation_dataset import load_dataset, DATASET_PATH
 
 import llm_backend
@@ -55,6 +56,33 @@ VALID_MODES = {"dense", "sparse", "hybrid"}
 # Full-word retrieval-mode labels for config_key -- spelled out rather than
 # abbreviated to a single letter (e.g. "L2_BM25", not "L2B").
 _MODE_LABEL = {"dense": "DENSE", "sparse": "BM25", "hybrid": "HYBRID"}
+
+# config_key suffix per section router. The oracle router has none, so every
+# existing config_key (and BASELINE_CONFIG_KEY, an alpha-0 key) is unchanged.
+_ROUTER_LABEL = {"oracle": "", "classifier": "_CLF", "agent": "_AGENT"}
+
+
+def _router_of(cfg: dict) -> str | None:
+    """The config's section router, or None when it does no routing (alpha 0).
+    Configs written before routers existed carry no key and mean the oracle."""
+    if cfg.get("section_alpha", 0.0) <= 0:
+        return None
+    return cfg.get("section_router") or "oracle"
+
+
+def _route_for(router: str, row) -> Route:
+    """
+    One question's routing decision under a router. Predicted routes are read
+    from the dataset (backfill_routes in build_evaluation_dataset.py), like every
+    other LLM-dependent per-question input in the lazy runner.
+    """
+    if router == "oracle":
+        return Route.oracle(row.get("category", ""))
+    raw = row.get(f"route_{router}")
+    if raw is None or (isinstance(raw, float) and pd.isna(raw)):
+        raise KeyError(f"No route_{router} for finder_id={row.get('finder_id')!r}. "
+                       "Run backfill_routes (build_evaluation_dataset.py) first.")
+    return Route.from_json(raw)
 
 
 def _short_level(level: int) -> str:
@@ -162,6 +190,21 @@ def run_multi_evaluation_lazy(
     a flat, unweighted filter; a query with no year signal falls back to the
     default 5-year window with exponential recency decay.
     """
+    # Predicted routes come from the dataset; check up front rather than skipping
+    # every question one by one. A dataset routed by two different classifiers
+    # would silently mix them, so that is refused too.
+    predicted = {_router_of(cfg) for cfg in configs} - {None, "oracle"}
+    if predicted:
+        cols = [f"route_{r}" for r in sorted(predicted)]
+        if any(c not in dataset.columns or dataset[c].isna().any() for c in cols):
+            raise ValueError(f"Dataset lacks {cols} for some rows -- run backfill_routes "
+                             "(build_evaluation_dataset.py) first.")
+        fps = dataset["route_fingerprint"].unique()
+        if len(fps) != 1:
+            raise ValueError(f"Dataset routes come from several classifiers {list(fps)} -- "
+                             "re-run backfill_routes.")
+        print(f"Section routers {sorted(predicted)} from classifier {fps[0]}")
+
     client  = get_qdrant_client()
     all_rows: list[dict] = []
     ts = datetime.now().strftime("%Y%m%d_%H%M")
@@ -218,7 +261,7 @@ def run_multi_evaluation_lazy(
         union_levels = sorted({l for _, cfg in cfg_group for l in cfg["levels"]})
         need_dense   = any(m in {"dense", "hybrid"} for m in union_modes)
         need_sparse  = any(m in {"sparse", "hybrid"} for m in union_modes)
-        any_section  = any(cfg.get("section_alpha", 0.0) > 0 for _, cfg in cfg_group) # for section routing
+        routers      = {_router_of(cfg) for _, cfg in cfg_group} - {None}  # for section routing
 
         def _prefetch_k_for(enhance_flag, level):
             relevant = [cfg for _, cfg in cfg_group
@@ -246,6 +289,14 @@ def run_multi_evaluation_lazy(
             category     = row.get("category", "")
             query_type   = row.get("query_type", "")
             print(f"\n[Q {q_idx+1}/{n_q}] {orig_query}")
+
+            try:
+                routes = {r: _route_for(r, row) for r in routers}
+            except KeyError as e:
+                print(f"  [skip] {e}")
+                continue
+            for r, route in routes.items():
+                print(f"  [route/{r}] {list(route.categories)} alpha={route.alpha} ({route.band}/{route.source})")
 
             # Build per-enhance-flag precomputed lookup (orig + enhanced variants). finder_df
             # is itself filtered from `dataset`, so this should always hit -- the try/except
@@ -296,10 +347,12 @@ def run_multi_evaluation_lazy(
                         "use_parent_fetch": COLLECTIONS[level]["use_parent_fetch"],
                     }
 
-            # Section cache: (query_text, level) → {dense, sparse}
+            # Section cache: (route items, query_text, level) → {dense, sparse}
+            # Keyed by the routed item set rather than the router, so routers that
+            # agree on a question (often oracle and agent) share one Track A retrieval.
             section_cache: dict[tuple, dict] = {}
-            if any_section:
-                sec_filter = make_section_filter(category)
+            for items in {route.items for route in routes.values() if route.active}:
+                sec_filter = make_items_filter(items)
                 if sec_filter:
                     for enh_flag, pc in precomp_cache.items():
                         qt        = pc["query"]
@@ -310,7 +363,7 @@ def run_multi_evaluation_lazy(
                         if year_val:
                             filters = {**filters, "year": year_val}
                         for level in union_levels:
-                            skey = (qt, level)
+                            skey = (items, qt, level)
                             if skey in section_cache:
                                 continue
                             pk       = retrieval_cache.get((qt, level), {}).get("pk", top_k)
@@ -329,7 +382,12 @@ def run_multi_evaluation_lazy(
                 qt            = pc["query"]
                 meta          = pc["meta"]
                 section_alpha = cfg.get("section_alpha", 0.0)
-                use_sec       = section_alpha > 0
+                router        = _router_of(cfg)
+                route         = routes[router] if router else None
+                # The router scales the configured alpha per question: an abstaining
+                # route (alpha 0, or no mapped items) falls back to Track B only.
+                eff_alpha     = section_alpha * route.alpha if route and route.active else 0.0
+                use_sec       = eff_alpha > 0
 
                 for level in cfg["levels"]:
                     rkey             = (qt, level)
@@ -339,7 +397,7 @@ def run_multi_evaluation_lazy(
                     sparse_results   = rc["sparse"]
                     use_parent_fetch = rc["use_parent_fetch"]
                     pk_cached        = rc["pk"]
-                    skey             = (qt, level)
+                    skey             = (route.items, qt, level) if use_sec else None
                     sec_dense_r      = section_cache.get(skey, {}).get("dense")  if use_sec else None
                     sec_sparse_r     = section_cache.get(skey, {}).get("sparse") if use_sec else None
 
@@ -351,14 +409,14 @@ def run_multi_evaluation_lazy(
                                 track_b = dense_results.points if hasattr(dense_results, "points") else []
                                 if use_sec and sec_dense_r is not None:
                                     track_a        = sec_dense_r.points if hasattr(sec_dense_r, "points") else []
-                                    context_points = section_fuse(track_a, track_b, section_alpha, top_k)
+                                    context_points = section_fuse(track_a, track_b, eff_alpha, top_k)
                                 else:
                                     context_points = track_b[:top_k]
                             elif retrieval_mode == "sparse":
                                 track_b = sparse_results.points if hasattr(sparse_results, "points") else []
                                 if use_sec and sec_sparse_r is not None:
                                     track_a        = sec_sparse_r.points if hasattr(sec_sparse_r, "points") else []
-                                    context_points = section_fuse(track_a, track_b, section_alpha, top_k)
+                                    context_points = section_fuse(track_a, track_b, eff_alpha, top_k)
                                 else:
                                     context_points = track_b[:top_k]
                             elif retrieval_mode == "hybrid":
@@ -369,7 +427,7 @@ def run_multi_evaluation_lazy(
                                         track_a = rrf_fuse_multi(sec_parts, top_k=pk_cached) if len(sec_parts) > 1 else (
                                             sec_parts[0].points if hasattr(sec_parts[0], "points") else []
                                         )
-                                        context_points = section_fuse(track_a, track_b, section_alpha, top_k)
+                                        context_points = section_fuse(track_a, track_b, eff_alpha, top_k)
                                     else:
                                         context_points = track_b[:top_k]
                                 else:
@@ -391,6 +449,9 @@ def run_multi_evaluation_lazy(
                             "retrieval_mode":  retrieval_mode,
                             "enh_flag":        enh_flag,
                             "section_alpha":   section_alpha,
+                            "section_router":  router,
+                            "route":           route,
+                            "eff_alpha":       eff_alpha,
                             "query_enhanced":  pc["enhanced_query"] if enh_flag else None,
                             "context_points":  context_points,
                             "rag_ret":         rag_ret,
@@ -469,7 +530,13 @@ def run_multi_evaluation_lazy(
                         "ticker_filter":       ticker_str,
                         "enhance_query_flag":  entry["enh_flag"],
                         "section_alpha":       entry["section_alpha"],
-                        "config_key":          f"{_short_level(entry['level'])}_{_MODE_LABEL[entry['retrieval_mode']]}_{'ENH' if entry['enh_flag'] else 'PLAIN'}_A{entry['section_alpha']}",
+                        "config_key":          f"{_short_level(entry['level'])}_{_MODE_LABEL[entry['retrieval_mode']]}_{'ENH' if entry['enh_flag'] else 'PLAIN'}_A{entry['section_alpha']}{_ROUTER_LABEL.get(entry['section_router'], '')}",
+                        # Routing as applied to this row; route_* are None for alpha-0 configs.
+                        "section_router":      entry["section_router"],
+                        "route_categories":    list(entry["route"].categories) if entry["route"] else None,
+                        "route_alpha":         entry["eff_alpha"],
+                        "route_band":          entry["route"].band if entry["route"] else None,
+                        "route_source":        entry["route"].source if entry["route"] else None,
                         "query":               orig_query,
                         "query_enhanced":      entry["query_enhanced"],
                         "category":            category,
@@ -501,6 +568,7 @@ def write_config(
     retrieval_modes: list[str] = None,
     enhance_query_flag = [True, False],
     section_alpha = [0 ,1], 
+    section_router: list[str] = None,
 ) -> list[dict]:
     """
     Generate all permutations of evaluation configs for the given tickers.
@@ -520,26 +588,42 @@ def write_config(
       0.0 → no section routing (Track B only)
       0.5 → soft routing (equal-weight blend of Track A and Track B)
       1.0 → hard routing (Track A only)
+
+    section_router picks where Track A's items come from (alpha > 0 only):
+      "oracle"      FinDER's given category (the original setup; default)
+      "classifier"  the classifier's deterministic three-band policy
+      "agent"       the same policy with an LLM deciding the non-confident bands
+    The router is meaningless at alpha 0, so alpha-0 configs are emitted once,
+    not once per router.
     """
     if levels is None:
         levels = list(COLLECTIONS.keys())
     if retrieval_modes is None:
         retrieval_modes = ["hybrid", "dense", "sparse"]
+    if section_router is None:
+        section_router = ["oracle"]
+    unknown = set(section_router) - set(ROUTERS)
+    if unknown:
+        raise ValueError(f"Unknown section_router(s) {sorted(unknown)}; expected {ROUTERS}")
 
     configs = []
-    for ticker, level, mode, enhance, alpha in product(
+    for ticker, level, mode, enhance, alpha, router in product(
         tickers,
         levels,
         retrieval_modes,
         enhance_query_flag,
         section_alpha,   
+        section_router,
     ):
+        if alpha <= 0 and router != section_router[0]:
+            continue
         configs.append({
             "tickers":            [ticker],
             "levels":             [level],
             "retrieval_modes":    [mode],
             "enhance_query_flag": enhance,
             "section_alpha":      alpha,
+            "section_router":     router if alpha > 0 else None,
         })
     return configs
 
@@ -560,7 +644,8 @@ if __name__ == "__main__":
                "mdlz", "ma", "yum", "nem", "iff"]
     configs = [
         write_config(tickers=TICKERS, levels=LEVELS, retrieval_modes=["sparse","dense","hybrid"],
-                     enhance_query_flag=[True, False], section_alpha=[0, 1]),
+                     enhance_query_flag=[True, False], section_alpha=[0, 1],
+                     section_router=["oracle", "classifier", "agent"]),
     ]
     print(f"Running {len(configs)} configs...")
 

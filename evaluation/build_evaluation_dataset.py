@@ -159,6 +159,51 @@ def build_dataset(
     return final
 
 
+def backfill_routes(
+    gen_model,
+    gen_tokenizer,
+    output_path: str = DATASET_PATH,
+) -> pd.DataFrame:
+    """
+    Add the predicted section routes (route_classifier / route_agent, Route JSON)
+    to every row whose routes are missing or were made by a different classifier.
+
+    Kept separate from build_dataset because it has to touch existing rows: the
+    routes depend on the saved classifier, so retraining it (new fingerprint)
+    must re-route the whole dataset, not just newly appended questions. Routing
+    reads only the original query -- like metadata extraction, it must never
+    depend on query enhancement.
+    """
+    from evaluation.section_classifier import SectionClassifier, route_queries
+
+    df, _ = load_dataset(output_path)
+    if df.empty:
+        print(f"[routes] no dataset at {output_path}")
+        return df
+
+    clf = SectionClassifier.load()
+    for col in ("route_classifier", "route_agent", "route_fingerprint"):
+        if col not in df.columns:
+            df[col] = None
+    todo = df.index[df["route_fingerprint"] != clf.fingerprint].tolist()
+    print(f"\n[routes] classifier {clf.fingerprint}: {len(todo)}/{len(df)} row(s) to route")
+
+    for lo in range(0, len(todo), BUILD_CHUNK):
+        idx    = todo[lo:lo + BUILD_CHUNK]
+        routes = route_queries(df.loc[idx, "query"].tolist(), clf, gen_model, gen_tokenizer)
+        for i, rc, ra in zip(idx, routes["classifier"], routes["agent"]):
+            df.at[i, "route_classifier"]  = rc.to_json()
+            df.at[i, "route_agent"]       = ra.to_json()
+            df.at[i, "route_fingerprint"] = clf.fingerprint
+            if ra.source != "classifier":
+                print(f"  [{ra.band}/{ra.source}] {df.at[i, 'query'][:70]!r} -> {list(ra.categories)}"
+                      f"  (clf: {list(rc.categories)})")
+        df.to_parquet(output_path, index=False)
+
+    print(f"[routes] done -> {output_path}")
+    return df
+
+
 if __name__ == "__main__":
     from mlx_embeddings.utils import load as emb_load
 
@@ -194,3 +239,7 @@ if __name__ == "__main__":
         embed_model=embed_model,
         embed_tokenizer=embed_tokenizer,
     )
+
+    # Needs the trained classifier (evaluation/section_classifier.py). Only rows
+    # without routes from the current classifier are routed.
+    backfill_routes(gen_model=gen_model, gen_tokenizer=gen_tokenizer)

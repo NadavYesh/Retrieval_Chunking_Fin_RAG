@@ -77,6 +77,10 @@ DEFAULT_WORKBOOK = (
 )
 
 ALPHA_COL = "section_alpha"
+# Which router's alpha-1 trials to test against alpha 0: "oracle" (FinDER's given
+# category, the original ablation), "classifier", or "agent". Workbooks from before
+# routers existed have no section_router column and are all oracle.
+ROUTER = "oracle"
 PAIR_KEYS = ["query", "base_cfg"]
 RECALL = "soft_Recall@3"
 MRR = "soft_MRR"
@@ -88,8 +92,12 @@ SPOTLIGHT = ["Legal", "Shareholder return", "Company overview", "Risk", "Governa
 def load_trials(workbook: Path) -> pd.DataFrame:
     df = pd.read_excel(workbook, sheet_name="detail")
     df[ALPHA_COL] = df[ALPHA_COL].astype(float)
-    # config_key encodes alpha as a trailing _A0/_A1; strip it to pair the trials
-    df["base_cfg"] = df["config_key"].str.replace(r"_A[01]$", "", regex=True)
+    if "section_router" in df.columns:
+        router = df["section_router"].fillna("oracle")
+        df = df[(df[ALPHA_COL] == 0) | (router == ROUTER)].copy()
+    # config_key encodes alpha (and a non-oracle router) as a trailing _A0/_A1[_CLF|_AGENT];
+    # strip it to pair the trials
+    df["base_cfg"] = df["config_key"].str.replace(r"_A[01](_[A-Z]+)?$", "", regex=True)
     if ORDINAL not in df.columns and {"relevance_int", "completeness_int"} <= set(df.columns):
         df[ORDINAL] = df[["relevance_int", "completeness_int"]].mean(axis=1)
     elif ORDINAL not in df.columns and "relevance" in df.columns:

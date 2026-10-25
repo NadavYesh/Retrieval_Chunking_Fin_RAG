@@ -387,6 +387,11 @@ def analyze_entry(idx: str, data: dict, corpus: pd.DataFrame, fp_index: dict,
     enhance_query_flag   = data.get("enhance_query_flag",   {}).get(idx)
     use_tiered_years     = data.get("use_tiered_years",     {}).get(idx)
     section_alpha        = data.get("section_alpha",         {}).get(idx)
+    section_router       = data.get("section_router",        {}).get(idx)
+    route_categories     = data.get("route_categories",      {}).get(idx)
+    route_alpha          = data.get("route_alpha",           {}).get(idx)
+    route_band           = data.get("route_band",            {}).get(idx)
+    route_source         = data.get("route_source",          {}).get(idx)
     ticker_filter        = data.get("ticker_filter",        {}).get(idx)
     level                = data.get("level",                {}).get(idx)
 
@@ -520,6 +525,14 @@ def analyze_entry(idx: str, data: dict, corpus: pd.DataFrame, fp_index: dict,
         "enhance_query_flag":  enhance_query_flag,
         "use_tiered_years":    use_tiered_years,
         "section_alpha":       section_alpha,
+        # Where Track A's items came from: oracle (FinDER category), classifier,
+        # or agent; None for alpha-0 rows. route_alpha is the alpha actually
+        # applied (0 when the router abstained), route_band/route_source say why.
+        "section_router":      section_router,
+        "route_categories":    ", ".join(route_categories) if isinstance(route_categories, list) else route_categories,
+        "route_alpha":         route_alpha,
+        "route_band":          route_band,
+        "route_source":        route_source,
         "ticker_filter":       ticker_filter,
 
         # ─── Retrieval volume ──────────────────────────────────────────────────
@@ -1371,7 +1384,7 @@ def _write_multi_excel(rows_df: pd.DataFrame, out_path: Path) -> None:
         for col in ("relevance_int", "completeness_int"):
             if col in df.columns:
                 agg_dict[col] = "mean"
-        for col in ("level", "mode", "enhance_query_flag", "use_tiered_years", "section_alpha"):
+        for col in ("level", "mode", "enhance_query_flag", "use_tiered_years", "section_alpha", "section_router"):
             if col in df.columns:
                 agg_dict[col] = "first"
 
@@ -1419,7 +1432,7 @@ def _write_multi_excel(rows_df: pd.DataFrame, out_path: Path) -> None:
         # across ALL rows with that dimension value — marginalising over everything else.
         # Makes it easy to answer "does section_alpha=0.5 beat 0.0 overall?" without
         # manually filtering the detail sheet.
-        dim_axes    = [c for c in ["level", "mode", "section_alpha", "enhance_query_flag", "use_tiered_years"] if c in df.columns]
+        dim_axes    = [c for c in ["level", "mode", "section_alpha", "section_router", "route_band", "enhance_query_flag", "use_tiered_years"] if c in df.columns]
         metric_cols = [c for c in [
             "evidence_hit", "word_recall", "num_recall",
             "soft_MRR", "soft_Recall@3",
